@@ -4,7 +4,10 @@ use crate::disk_usage::{find_folder_by_path, SortBy};
 use crate::tui::{
     state::AppState,
     theme::Styles,
-    widgets::shortcuts::{get_shortcuts, render_shortcuts},
+    widgets::{
+        logo::{render_logo, render_tagline, LOGO_WITH_TAGLINE_HEIGHT},
+        shortcuts::{get_shortcuts, render_shortcuts},
+    },
 };
 use bytesize::to_string as bytesize_to_string;
 use ratatui::{
@@ -34,27 +37,32 @@ pub fn render(f: &mut Frame, app_state: &mut AppState) {
 
     let shortcuts_height = 3;
 
-    // Layout: header, search bar, content, shortcuts
+    // Layout: logo, header, search bar, content, shortcuts
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Length(3), // Search bar
-            Constraint::Min(1),    // Content
+            Constraint::Length(LOGO_WITH_TAGLINE_HEIGHT), // Logo + tagline
+            Constraint::Length(3),                        // Header
+            Constraint::Length(3),                        // Search bar
+            Constraint::Min(1),                           // Content
             Constraint::Length(shortcuts_height),
         ])
         .split(area);
 
+    // Render logo and tagline
+    render_logo(f, chunks[0]);
+    render_tagline(f, chunks[0]);
+
     // Render header
-    render_header(f, chunks[0], &insights_clone, &current_path_clone);
+    render_header(f, chunks[1], &insights_clone, &current_path_clone);
 
     // Render search bar
-    render_search_bar(f, chunks[1], app_state);
+    render_search_bar(f, chunks[2], app_state);
 
     // Render content
     render_content(
         f,
-        chunks[2],
+        chunks[3],
         &insights_clone,
         &current_path_clone,
         cursor,
@@ -64,7 +72,7 @@ pub fn render(f: &mut Frame, app_state: &mut AppState) {
 
     // Render shortcuts
     let shortcuts = get_shortcuts(&app_state.screen, Some(app_state));
-    render_shortcuts(f, chunks[3], &shortcuts);
+    render_shortcuts(f, chunks[4], &shortcuts);
 }
 
 fn render_header(
