@@ -85,8 +85,10 @@ fn scan_directory(
     // Clone again for the second closure
     let config_clone_for_each = Arc::clone(&config_clone);
 
-    // Use Mutex for thread-safe collection
-    let found_files: Mutex<Vec<(PathBuf, u64)>> = Mutex::new(Vec::new());
+    // Use Arc<Mutex<>> for thread-safe collection that can be shared
+    let found_files: Arc<Mutex<Vec<(PathBuf, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+    // Clone Arc for the closure
+    let found_files_clone = Arc::clone(&found_files);
 
     // Use jwalk for parallel directory traversal
     WalkDir::new(dir)
@@ -181,12 +183,16 @@ fn scan_directory(
                 }
             }
 
-            let mut files_guard = found_files.lock().unwrap();
+            let mut files_guard = found_files_clone.lock().unwrap();
             files_guard.push((path, metadata.len()));
         });
 
     // Move collected files to output
-    let mut collected = found_files.into_inner().unwrap();
+    // Use Arc::try_unwrap to get the inner Mutex, then into_inner to get the Vec
+    let mut collected = Arc::try_unwrap(found_files)
+        .unwrap()
+        .into_inner()
+        .unwrap();
     files.append(&mut collected);
 
     Ok(())

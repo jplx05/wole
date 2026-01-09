@@ -617,15 +617,14 @@ mod tests {
 
         let mut entries: Vec<String> = Vec::new();
         // Use a very limited depth to prevent any stack issues
-        for entry in WalkDir::new(temp_dir.path())
+        for e in WalkDir::new(temp_dir.path())
             .max_depth(2) // Increased from 1 to allow subdirectories but still safe
             .into_iter()
             .filter_entry(|e| !should_skip_entry(e.path()))
+            .flatten()
         {
-            if let Ok(e) = entry {
-                if let Some(name) = e.path().file_name() {
-                    entries.push(name.to_string_lossy().to_string());
-                }
+            if let Some(name) = e.path().file_name() {
+                entries.push(name.to_string_lossy().to_string());
             }
         }
 

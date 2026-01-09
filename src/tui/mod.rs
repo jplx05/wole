@@ -37,7 +37,7 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Initialize app state (use provided or create new)
-    let mut app_state = initial_state.unwrap_or_else(AppState::new);
+    let mut app_state = initial_state.unwrap_or_default();
     let mut scan_pending = false;
     let mut clean_pending = false;
 

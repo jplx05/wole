@@ -209,16 +209,12 @@ fn handle_confirm_click(app_state: &mut AppState, row: u16, _col: u16) -> EventR
             app_state.cursor = data_index;
             if _col < 8 {
                 handle_confirm_event(app_state, KeyCode::Char(' '), KeyModifiers::empty());
-            } else {
-                if let Some(r) = rows.get(data_index) {
-                    match r {
-                        crate::tui::state::ConfirmRow::CategoryHeader { .. }
-                        | crate::tui::state::ConfirmRow::FolderHeader { .. } => {
-                            handle_confirm_event(app_state, KeyCode::Enter, KeyModifiers::empty());
-                        }
-                        _ => {}
-                    }
-                }
+            } else if let Some(
+                crate::tui::state::ConfirmRow::CategoryHeader { .. }
+                | crate::tui::state::ConfirmRow::FolderHeader { .. },
+            ) = rows.get(data_index)
+            {
+                handle_confirm_event(app_state, KeyCode::Enter, KeyModifiers::empty());
             }
         }
     }

@@ -233,11 +233,12 @@ mod tests {
 
     #[test]
     fn test_restore_result_summary() {
-        let mut result = RestoreResult::default();
-        result.restored = 5;
-        result.restored_bytes = 1024 * 1024; // 1 MB
-        result.errors = 1;
-        result.not_found = 2;
+        let result = RestoreResult {
+            restored: 5,
+            restored_bytes: 1024 * 1024, // 1 MB
+            errors: 1,
+            not_found: 2,
+        };
 
         let summary = result.summary();
         assert!(summary.contains("5"));

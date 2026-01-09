@@ -162,6 +162,6 @@ mod tests {
     fn test_is_dirty_no_repo() {
         let temp_dir = create_test_dir();
         // No git repo, should return Ok(false)
-        assert_eq!(is_dirty(temp_dir.path()).unwrap(), false);
+        assert!(!is_dirty(temp_dir.path()).unwrap());
     }
 }
