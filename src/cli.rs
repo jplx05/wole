@@ -301,11 +301,21 @@ impl Cli {
                     (cache, temp, trash, build, downloads, large, old, false, false, false, false)
                 };
                 
+                // Default to Documents folder instead of entire home directory
+                // Home directory (especially with OneDrive) can have extremely deep structures
+                // that cause stack overflow even with depth limits
                 let scan_path = path.unwrap_or_else(|| {
-                    directories::UserDirs::new()
-                        .expect("Failed to get user directory")
-                        .home_dir()
-                        .to_path_buf()
+                    if let Some(user_dirs) = directories::UserDirs::new() {
+                        if let Some(documents) = user_dirs.document_dir() {
+                            documents.to_path_buf()
+                        } else {
+                            user_dirs.home_dir().to_path_buf()
+                        }
+                    } else {
+                        std::env::var("USERPROFILE")
+                            .map(|p| PathBuf::from(p).join("Documents"))
+                            .unwrap_or_else(|_| PathBuf::from("."))
+                    }
                 });
                 
                 let min_size_bytes = size::parse_size(&min_size)

@@ -125,12 +125,25 @@ pub fn is_project_active(path: &Path, age_days: u64) -> Result<bool> {
 }
 
 /// Find all project roots in a directory tree
+/// 
+/// Uses a conservative depth limit to prevent stack overflow on Windows.
+/// For very deep directory structures, consider scanning specific subdirectories instead.
 pub fn find_project_roots(root: &Path) -> Vec<PathBuf> {
+    // Safety check: warn if scanning a very large directory tree
+    if root.components().count() > 10 {
+        // Path is already very deep, limit scanning even more
+        eprintln!("Warning: Scanning very deep path. Consider using a more specific directory.");
+    }
+    
     let mut projects = Vec::new();
     let mut seen = std::collections::HashSet::new();
     
+    // Use a very conservative depth limit to prevent stack overflow
+    // Windows has smaller default stack sizes, and scanning user directories
+    // can have extremely deep nested structures
+    const MAX_DEPTH: usize = 5;
     for entry in WalkDir::new(root)
-        .max_depth(10) // Limit depth to avoid excessive scanning
+        .max_depth(MAX_DEPTH) // Limit depth to avoid excessive scanning and stack overflow
         .into_iter()
         .filter_map(|e| e.ok())
     {
