@@ -11,6 +11,10 @@
   <a href="https://x.com/jpaulpoliquit"><img src="https://img.shields.io/badge/follow-jpaulpoliquit-red?style=flat-square&logo=X" alt="X (Twitter)"></a>
 </p>
 
+<p align="center">
+  <img src="src/public/wole.png" alt="Wole - Windows disk cleanup tool" width="1000" />
+</p>
+
 ## Features
 
 - **All-in-one toolkit**: CCleaner, WinDirStat, and TreeSize combined into a **single binary**
