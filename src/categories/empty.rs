@@ -24,8 +24,8 @@ pub fn scan(_root: &Path) -> Result<CategoryResult> {
         
         // Walk directories, checking each one
         // Limit depth to prevent stack overflow, especially on Windows with smaller stack size
-        // Use a conservative limit since this is called during tests which may have limited stack
-        const MAX_DEPTH: usize = 30;
+        // Use a very conservative limit for Windows test threads (2MB stack)
+        const MAX_DEPTH: usize = 10;
         for entry in WalkDir::new(&dir)
             .max_depth(MAX_DEPTH)
             .follow_links(false)
@@ -88,9 +88,9 @@ fn get_user_directories() -> Result<Vec<PathBuf>> {
 fn is_dir_empty(path: &Path) -> Result<bool> {
     let mut has_files = false;
     
-    // Use a conservative depth limit since this is called for every directory
+    // Use a very conservative depth limit since this is called for every directory
     // in the main scan, creating nested recursion
-    const MAX_CHECK_DEPTH: usize = 20;
+    const MAX_CHECK_DEPTH: usize = 5;
     
     for entry in WalkDir::new(path)
         .max_depth(MAX_CHECK_DEPTH)

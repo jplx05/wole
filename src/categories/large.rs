@@ -75,7 +75,7 @@ fn scan_directory(
     }
     
     // Limit depth to prevent stack overflow, especially on Windows with smaller stack size
-    const MAX_DEPTH: usize = 100;
+    const MAX_DEPTH: usize = 20;
     for entry in WalkDir::new(dir)
         .max_depth(MAX_DEPTH)
         .follow_links(false)
