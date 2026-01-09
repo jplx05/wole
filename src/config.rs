@@ -167,7 +167,6 @@ impl Config {
 fn matches_pattern(path: &str, pattern: &str) -> bool {
     // Convert pattern to regex-like matching
     let pattern = pattern.replace("**", ".*");
-    let pattern = format!("^{}$", pattern);
     
     // Simple case-insensitive matching
     let path_lower = path.to_lowercase();
@@ -175,8 +174,10 @@ fn matches_pattern(path: &str, pattern: &str) -> bool {
     
     // Check if pattern matches (simplified - could use proper glob crate)
     if pattern_lower.contains(".*") {
-        // Wildcard pattern
-        let parts: Vec<&str> = pattern_lower.split(".*").collect();
+        // Wildcard pattern - split on .* to get literal parts
+        // Remove any anchors before splitting to avoid treating them as literals
+        let pattern_to_split = pattern_lower.trim_start_matches('^').trim_end_matches('$');
+        let parts: Vec<&str> = pattern_to_split.split(".*").collect();
         let mut search_path = path_lower.as_str();
         for part in parts {
             if part.is_empty() {
@@ -190,7 +191,8 @@ fn matches_pattern(path: &str, pattern: &str) -> bool {
         }
         true
     } else {
-        path_lower.contains(&pattern_lower.trim_start_matches('^').trim_end_matches('$'))
+        // No wildcards - simple substring match
+        path_lower.contains(&pattern_lower)
     }
 }
 
@@ -215,5 +217,28 @@ mod tests {
         assert!(config.is_excluded(Path::new("C:/Users/me/important-project/file.txt")));
         assert!(config.is_excluded(Path::new("C:/backup/data.txt")));
         assert!(!config.is_excluded(Path::new("C:/Users/me/other/file.txt")));
+    }
+    
+    #[test]
+    fn test_config_apply_cli_overrides() {
+        let mut config = Config::default();
+        config.apply_cli_overrides(Some(21), Some(45), Some(150));
+        
+        assert_eq!(config.thresholds.project_age_days, 21);
+        assert_eq!(config.thresholds.min_age_days, 45);
+        assert_eq!(config.thresholds.min_size_mb, 150);
+    }
+    
+    #[test]
+    fn test_config_partial_overrides() {
+        let mut config = Config::default();
+        let original_age = config.thresholds.min_age_days;
+        
+        // Only override project_age, leave others unchanged
+        config.apply_cli_overrides(Some(30), None, None);
+        
+        assert_eq!(config.thresholds.project_age_days, 30);
+        assert_eq!(config.thresholds.min_age_days, original_age);
+        assert_eq!(config.thresholds.min_size_mb, 100); // Default
     }
 }

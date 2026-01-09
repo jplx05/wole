@@ -129,6 +129,22 @@ pub enum Commands {
         #[arg(long)]
         old: bool,
         
+        /// Clean browser caches (Chrome, Edge, Firefox)
+        #[arg(long)]
+        browser: bool,
+        
+        /// Clean Windows system caches (thumbnails, updates, icons)
+        #[arg(long)]
+        system: bool,
+        
+        /// Clean empty folders
+        #[arg(long)]
+        empty: bool,
+        
+        /// Clean duplicate files (keeps one copy)
+        #[arg(long)]
+        duplicates: bool,
+        
         /// Root path to scan (default: home directory)
         #[arg(long, value_name = "PATH")]
         path: Option<PathBuf>,
@@ -201,6 +217,22 @@ pub enum Commands {
         #[arg(long)]
         old: bool,
         
+        /// Scan browser caches (Chrome, Edge, Firefox)
+        #[arg(long)]
+        browser: bool,
+        
+        /// Scan Windows system caches (thumbnails, updates, icons)
+        #[arg(long)]
+        system: bool,
+        
+        /// Scan for empty folders
+        #[arg(long)]
+        empty: bool,
+        
+        /// Scan for duplicate files
+        #[arg(long)]
+        duplicates: bool,
+        
         /// Root path to scan (default: home directory)
         #[arg(long, value_name = "PATH")]
         path: Option<PathBuf>,
@@ -255,17 +287,17 @@ impl Cli {
         };
         
         match self.command {
-            Commands::Scan { all, cache, temp, trash, build, downloads, large, old, path, json, project_age, min_age, min_size, exclude } => {
+            Commands::Scan { all, cache, temp, trash, build, downloads, large, old, browser, system, empty, duplicates, path, json, project_age, min_age, min_size, exclude } => {
                 // --all enables all categories
-                let (cache, temp, trash, build, downloads, large, old) = if all {
-                    (true, true, true, true, true, true, true)
-                } else if !cache && !temp && !trash && !build && !downloads && !large && !old {
+                let (cache, temp, trash, build, downloads, large, old, browser, system, empty, duplicates) = if all {
+                    (true, true, true, true, true, true, true, true, true, true, true)
+                } else if !cache && !temp && !trash && !build && !downloads && !large && !old && !browser && !system && !empty && !duplicates {
                     // No categories specified - show help message
                     eprintln!("No categories specified. Use --all or specify categories like --cache, --temp, --build");
                     eprintln!("Run 'sweeper scan --help' for more information.");
                     return Ok(());
                 } else {
-                    (cache, temp, trash, build, downloads, large, old)
+                    (cache, temp, trash, build, downloads, large, old, browser, system, empty, duplicates)
                 };
                 
                 let scan_path = path.unwrap_or_else(|| {
@@ -292,6 +324,10 @@ impl Cli {
                         downloads,
                         large,
                         old,
+                        browser,
+                        system,
+                        empty,
+                        duplicates,
                         project_age_days: project_age,
                         min_age_days: min_age,
                         min_size_bytes,
@@ -308,17 +344,17 @@ impl Cli {
                 
                 Ok(())
             }
-            Commands::Clean { all, cache, temp, trash, build, downloads, large, old, path, json, yes, project_age, min_age, min_size, exclude, permanent, dry_run } => {
+            Commands::Clean { all, cache, temp, trash, build, downloads, large, old, browser, system, empty, duplicates, path, json, yes, project_age, min_age, min_size, exclude, permanent, dry_run } => {
                 // --all enables all categories
-                let (cache, temp, trash, build, downloads, large, old) = if all {
-                    (true, true, true, true, true, true, true)
-                } else if !cache && !temp && !trash && !build && !downloads && !large && !old {
+                let (cache, temp, trash, build, downloads, large, old, browser, system, empty, duplicates) = if all {
+                    (true, true, true, true, true, true, true, true, true, true, true)
+                } else if !cache && !temp && !trash && !build && !downloads && !large && !old && !browser && !system && !empty && !duplicates {
                     // No categories specified - show help message
                     eprintln!("No categories specified. Use --all or specify categories like --cache, --temp, --build");
                     eprintln!("Run 'sweeper clean --help' for more information.");
                     return Ok(());
                 } else {
-                    (cache, temp, trash, build, downloads, large, old)
+                    (cache, temp, trash, build, downloads, large, old, browser, system, empty, duplicates)
                 };
                 
                 let scan_path = path.unwrap_or_else(|| {
@@ -345,6 +381,10 @@ impl Cli {
                         downloads,
                         large,
                         old,
+                        browser,
+                        system,
+                        empty,
+                        duplicates,
                         project_age_days: project_age,
                         min_age_days: min_age,
                         min_size_bytes,
@@ -363,17 +403,17 @@ impl Cli {
                 
                 Ok(())
             }
-            Commands::Analyze { all, cache, temp, trash, build, downloads, large, old, path, project_age, min_age, min_size, exclude } => {
+            Commands::Analyze { all, cache, temp, trash, build, downloads, large, old, browser, system, empty, duplicates, path, project_age, min_age, min_size, exclude } => {
                 // --all enables all categories
-                let (cache, temp, trash, build, downloads, large, old) = if all {
-                    (true, true, true, true, true, true, true)
-                } else if !cache && !temp && !trash && !build && !downloads && !large && !old {
+                let (cache, temp, trash, build, downloads, large, old, browser, system, empty, duplicates) = if all {
+                    (true, true, true, true, true, true, true, true, true, true, true)
+                } else if !cache && !temp && !trash && !build && !downloads && !large && !old && !browser && !system && !empty && !duplicates {
                     // No categories specified - show help message
                     eprintln!("No categories specified. Use --all or specify categories like --cache, --temp, --build");
                     eprintln!("Run 'sweeper analyze --help' for more information.");
                     return Ok(());
                 } else {
-                    (cache, temp, trash, build, downloads, large, old)
+                    (cache, temp, trash, build, downloads, large, old, browser, system, empty, duplicates)
                 };
                 
                 let scan_path = path.unwrap_or_else(|| {
@@ -400,6 +440,10 @@ impl Cli {
                         downloads,
                         large,
                         old,
+                        browser,
+                        system,
+                        empty,
+                        duplicates,
                         project_age_days: project_age,
                         min_age_days: min_age,
                         min_size_bytes,
@@ -492,6 +536,10 @@ pub struct ScanOptions {
     pub downloads: bool,
     pub large: bool,
     pub old: bool,
+    pub browser: bool,
+    pub system: bool,
+    pub empty: bool,
+    pub duplicates: bool,
     pub project_age_days: u64,
     pub min_age_days: u64,
     pub min_size_bytes: u64,

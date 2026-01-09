@@ -7,13 +7,21 @@ $REPO = "jpaulpoliquit/sweeper"
 
 # Detect architecture
 $ARCH = $env:PROCESSOR_ARCHITECTURE
-if ($ARCH -eq "AMD64") {
+if ([string]::IsNullOrEmpty($ARCH)) {
+    # Fallback: check if system is 64-bit
+    if ([System.Environment]::Is64BitOperatingSystem) {
+        $ARCH = "x86_64"
+    } else {
+        Write-Error "Unsupported architecture: Unable to detect system architecture"
+        exit 1
+    }
+} elseif ($ARCH -eq "AMD64" -or $ARCH -eq "x64") {
     $ARCH = "x86_64"
 } elseif ($ARCH -eq "ARM64") {
     $ARCH = "arm64"
 } else {
-    Write-Error "Unsupported architecture: $ARCH"
-    exit 1
+    Write-Warning "Unknown architecture '$ARCH', defaulting to x86_64"
+    $ARCH = "x86_64"
 }
 
 # Windows only has x86_64 builds for now
@@ -110,7 +118,7 @@ try {
     
     if ($CURRENT_PATH -notlike "*$INSTALL_DIR_NORMALIZED*") {
         Write-Host "Note: Restart your terminal or run this to use sweeper immediately:" -ForegroundColor Yellow
-        Write-Host "  `$env:Path += `";$INSTALL_DIR_NORMALIZED`"" -ForegroundColor White
+        Write-Host ('  $env:Path += ";' + $INSTALL_DIR_NORMALIZED + '"') -ForegroundColor White
         Write-Host ""
     }
     

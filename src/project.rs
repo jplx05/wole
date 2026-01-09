@@ -160,3 +160,64 @@ pub fn find_project_roots(root: &Path) -> Vec<PathBuf> {
     
     projects
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+    
+    fn create_test_dir() -> TempDir {
+        tempfile::tempdir().unwrap()
+    }
+    
+    #[test]
+    fn test_detect_project_type_node() {
+        let temp_dir = create_test_dir();
+        let package_json = temp_dir.path().join("package.json");
+        fs::write(&package_json, r#"{"name": "test"}"#).unwrap();
+        
+        assert_eq!(detect_project_type(temp_dir.path()), Some(ProjectType::Node));
+    }
+    
+    #[test]
+    fn test_detect_project_type_rust() {
+        let temp_dir = create_test_dir();
+        let cargo_toml = temp_dir.path().join("Cargo.toml");
+        fs::write(&cargo_toml, "[package]").unwrap();
+        
+        assert_eq!(detect_project_type(temp_dir.path()), Some(ProjectType::Rust));
+    }
+    
+    #[test]
+    fn test_detect_project_type_python() {
+        let temp_dir = create_test_dir();
+        let pyproject = temp_dir.path().join("pyproject.toml");
+        fs::write(&pyproject, "[project]").unwrap();
+        
+        assert_eq!(detect_project_type(temp_dir.path()), Some(ProjectType::Python));
+    }
+    
+    #[test]
+    fn test_detect_project_type_none() {
+        let temp_dir = create_test_dir();
+        // No project files
+        assert_eq!(detect_project_type(temp_dir.path()), None);
+    }
+    
+    #[test]
+    fn test_find_project_roots() {
+        let temp_dir = create_test_dir();
+        let project1 = temp_dir.path().join("project1");
+        let project2 = temp_dir.path().join("project2");
+        
+        fs::create_dir_all(&project1).unwrap();
+        fs::create_dir_all(&project2).unwrap();
+        
+        fs::write(project1.join("package.json"), "{}").unwrap();
+        fs::write(project2.join("Cargo.toml"), "[package]").unwrap();
+        
+        let roots = find_project_roots(temp_dir.path());
+        assert_eq!(roots.len(), 2);
+    }
+}

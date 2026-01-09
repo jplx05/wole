@@ -22,14 +22,22 @@ pub fn clean_all(
         + results.build.items
         + results.downloads.items
         + results.large.items
-        + results.old.items;
+        + results.old.items
+        + results.browser.items
+        + results.system.items
+        + results.empty.items
+        + results.duplicates.items;
     let total_bytes = results.cache.size_bytes
         + results.temp.size_bytes
         + results.trash.size_bytes
         + results.build.size_bytes
         + results.downloads.size_bytes
         + results.large.size_bytes
-        + results.old.size_bytes;
+        + results.old.size_bytes
+        + results.browser.size_bytes
+        + results.system.size_bytes
+        + results.empty.size_bytes
+        + results.duplicates.size_bytes;
     
     if total_items == 0 {
         if mode != OutputMode::Quiet {
@@ -265,6 +273,114 @@ pub fn clean_all(
         cleaned_bytes += results.old.size_bytes;
     }
     
+    // Clean browser caches
+    if results.browser.items > 0 {
+        if let Some(ref pb) = progress {
+            pb.set_message("Cleaning browser caches...");
+        }
+        for path in &results.browser.paths {
+            if dry_run {
+                cleaned += 1;
+                if let Some(ref pb) = progress { pb.inc(1); }
+            } else {
+                match categories::browser::clean(path) {
+                    Ok(()) => {
+                        cleaned += 1;
+                        if let Some(ref pb) = progress { pb.inc(1); }
+                    }
+                    Err(e) => {
+                        errors += 1;
+                        if mode != OutputMode::Quiet {
+                            eprintln!("{} Failed to clean {}: {}", "⚠".yellow(), path.display(), e);
+                        }
+                    }
+                }
+            }
+        }
+        cleaned_bytes += results.browser.size_bytes;
+    }
+    
+    // Clean system caches
+    if results.system.items > 0 {
+        if let Some(ref pb) = progress {
+            pb.set_message("Cleaning system caches...");
+        }
+        for path in &results.system.paths {
+            if dry_run {
+                cleaned += 1;
+                if let Some(ref pb) = progress { pb.inc(1); }
+            } else {
+                match categories::system::clean(path) {
+                    Ok(()) => {
+                        cleaned += 1;
+                        if let Some(ref pb) = progress { pb.inc(1); }
+                    }
+                    Err(e) => {
+                        errors += 1;
+                        if mode != OutputMode::Quiet {
+                            eprintln!("{} Failed to clean {}: {}", "⚠".yellow(), path.display(), e);
+                        }
+                    }
+                }
+            }
+        }
+        cleaned_bytes += results.system.size_bytes;
+    }
+    
+    // Clean empty folders
+    if results.empty.items > 0 {
+        if let Some(ref pb) = progress {
+            pb.set_message("Cleaning empty folders...");
+        }
+        for path in &results.empty.paths {
+            if dry_run {
+                cleaned += 1;
+                if let Some(ref pb) = progress { pb.inc(1); }
+            } else {
+                match categories::empty::clean(path) {
+                    Ok(()) => {
+                        cleaned += 1;
+                        if let Some(ref pb) = progress { pb.inc(1); }
+                    }
+                    Err(e) => {
+                        errors += 1;
+                        if mode != OutputMode::Quiet {
+                            eprintln!("{} Failed to clean {}: {}", "⚠".yellow(), path.display(), e);
+                        }
+                    }
+                }
+            }
+        }
+        cleaned_bytes += results.empty.size_bytes;
+    }
+    
+    // Clean duplicate files
+    if results.duplicates.items > 0 {
+        if let Some(ref pb) = progress {
+            pb.set_message("Cleaning duplicate files...");
+        }
+        for path in &results.duplicates.paths {
+            if dry_run {
+                cleaned += 1;
+                if let Some(ref pb) = progress { pb.inc(1); }
+            } else {
+                match clean_path(path, permanent) {
+                    Ok(()) => {
+                        cleaned += 1;
+                        if let Some(ref pb) = progress { pb.inc(1); }
+                    }
+                    Err(e) => {
+                        errors += 1;
+                        if mode != OutputMode::Quiet {
+                            eprintln!("{} Failed to clean {}: {}", "⚠".yellow(), path.display(), e);
+                        }
+                    }
+                }
+            }
+        }
+        cleaned_bytes += results.duplicates.size_bytes;
+    }
+    
     // Finish progress bar
     if let Some(pb) = progress {
         pb.finish_and_clear();
@@ -319,4 +435,42 @@ fn clean_path(path: &Path, permanent: bool) -> Result<()> {
             .with_context(|| format!("Failed to delete: {}", path.display()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::output::ScanResults;
+    use std::fs;
+    use tempfile::TempDir;
+    
+    fn create_test_dir() -> TempDir {
+        tempfile::tempdir().unwrap()
+    }
+    
+    #[test]
+    fn test_clean_all_empty_results() {
+        let results = ScanResults::default();
+        
+        // Should return Ok without doing anything
+        let result = clean_all(&results, true, OutputMode::Normal, false, false);
+        assert!(result.is_ok());
+    }
+    
+    #[test]
+    fn test_clean_all_dry_run() {
+        let temp_dir = create_test_dir();
+        let file = temp_dir.path().join("test.txt");
+        fs::write(&file, "test content").unwrap();
+        
+        let mut results = ScanResults::default();
+        results.cache.paths.push(file.clone());
+        results.cache.items = 1;
+        results.cache.size_bytes = 12;
+        
+        // Dry run should not delete the file
+        let result = clean_all(&results, true, OutputMode::Normal, false, true);
+        assert!(result.is_ok());
+        assert!(file.exists()); // File should still exist
+    }
 }

@@ -1,8 +1,8 @@
 use crate::output::CategoryResult;
 use crate::project;
+use crate::utils;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
 
 /// Build artifact directories to detect
 const BUILD_ARTIFACTS: &[&str] = &[
@@ -23,15 +23,24 @@ const BUILD_ARTIFACTS: &[&str] = &[
     ".gradle",
     ".parcel-cache",
     ".turbo",
+    ".angular",
+    ".svelte-kit",
+    "coverage",
+    ".nyc_output",
 ];
 
 /// Scan for build artifacts in inactive projects
+/// 
+/// Uses shared calculate_dir_size for consistent size calculation.
+/// Sorts results by size for better UX.
 pub fn scan(root: &Path, project_age_days: u64) -> Result<CategoryResult> {
     let mut result = CategoryResult::default();
-    let mut paths = Vec::new();
     
     // Find all project roots
     let project_roots = project::find_project_roots(root);
+    
+    // Collect artifacts with sizes for sorting
+    let mut artifacts_with_sizes: Vec<(PathBuf, u64)> = Vec::new();
     
     // Filter to inactive projects only
     for project_root in project_roots {
@@ -41,24 +50,32 @@ pub fn scan(root: &Path, project_age_days: u64) -> Result<CategoryResult> {
                 let artifacts = find_build_artifacts(&project_root);
                 for artifact_path in artifacts {
                     if artifact_path.exists() {
-                        let size = calculate_size(&artifact_path)?;
-                        result.items += 1;
-                        result.size_bytes += size;
-                        paths.push(artifact_path);
+                        let size = utils::calculate_dir_size(&artifact_path);
+                        if size > 0 {
+                            artifacts_with_sizes.push((artifact_path, size));
+                        }
                     }
                 }
             }
             Ok(true) => {
                 // Project is active - skip it
             }
-            Err(e) => {
-                // Error checking activity - skip with warning
-                eprintln!("Warning: Could not check activity for {}: {}", project_root.display(), e);
+            Err(_) => {
+                // Error checking activity - skip silently
             }
         }
     }
     
-    result.paths = paths;
+    // Sort by size descending (biggest first)
+    artifacts_with_sizes.sort_by(|a, b| b.1.cmp(&a.1));
+    
+    // Build result
+    for (path, size) in artifacts_with_sizes {
+        result.items += 1;
+        result.size_bytes += size;
+        result.paths.push(path);
+    }
+    
     Ok(result)
 }
 
@@ -68,31 +85,12 @@ fn find_build_artifacts(project_path: &Path) -> Vec<PathBuf> {
     
     for artifact_name in BUILD_ARTIFACTS {
         let artifact_path = project_path.join(artifact_name);
-        if artifact_path.exists() {
+        if artifact_path.exists() && artifact_path.is_dir() {
             artifacts.push(artifact_path);
         }
     }
     
     artifacts
-}
-
-/// Calculate the total size of a directory
-fn calculate_size(path: &Path) -> Result<u64> {
-    let mut total = 0u64;
-    
-    for entry in WalkDir::new(path)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if let Ok(metadata) = entry.metadata() {
-            if metadata.is_file() {
-                total += metadata.len();
-            }
-        }
-    }
-    
-    Ok(total)
 }
 
 /// Clean (delete) a build artifact directory by moving it to the Recycle Bin

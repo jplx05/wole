@@ -98,17 +98,41 @@ cargo build
 
 ```bash
 # Scan for reclaimable space
+sweeper scan --all
+
+# Scan specific categories
 sweeper scan --build --cache --temp
 
 # Preview what would be deleted
 sweeper scan --build --cache
+
+# Detailed analysis with file lists
+sweeper analyze --all
 
 # Clean inactive projects (with confirmation)
 sweeper clean --build --cache
 
 # Clean without confirmation
 sweeper clean --build --cache -y
+
+# Dry run (preview without deleting)
+sweeper clean --all --dry-run
+
+# Permanent delete (bypass Recycle Bin)
+sweeper clean --temp --permanent -y
+
+# Exclude specific paths
+sweeper scan --all --exclude "**/important-project/**"
 ```
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `scan` | Find cleanable files (safe, dry-run by default) |
+| `clean` | Delete files found by scan (with confirmation) |
+| `analyze` | Show detailed breakdown with file lists and statistics |
+| `config` | View or modify configuration settings |
 
 ## Categories
 
@@ -118,15 +142,61 @@ sweeper clean --build --cache -y
 | `--cache` | npm/yarn/pnpm, NuGet, Cargo, pip caches |
 | `--temp` | Windows temp directories (files older than 1 day) |
 | `--trash` | Recycle Bin contents |
+| `--downloads` | Old files in Downloads folder (default: 30+ days) |
+| `--large` | Files over size threshold (default: 100MB) |
+| `--old` | Files not accessed in N days (default: 30+ days) |
+
+## Options
+
+### Common Options
+
+- `--all`, `-a` - Enable all scan categories at once
+- `--exclude <PATTERN>` - Exclude paths matching pattern (repeatable)
+- `--path <PATH>` - Root path to scan (default: home directory)
+- `--json` - Output results as JSON for scripting
+- `-v`, `-vv` - Increase verbosity
+- `-q` - Quiet mode (errors only)
+
+### Scan Options
+
+- `--project-age <DAYS>` - Project inactivity threshold (default: 14 days)
+- `--min-age <DAYS>` - Minimum file age for downloads/old (default: 30 days)
+- `--min-size <SIZE>` - Minimum file size for large files (default: 100MB)
+
+### Clean Options
+
+- `-y`, `--yes` - Skip confirmation prompt
+- `--permanent` - Permanently delete (bypass Recycle Bin)
+- `--dry-run` - Preview only, don't delete
 
 ## Configuration
 
-Config file: `%APPDATA%\sweeper\config.toml` (coming in Phase 3)
+Config file: `%APPDATA%\sweeper\config.toml`
 
 ```toml
-[activity]
-active_threshold_days = 30
-skip_if_uncommitted_changes = true
+[thresholds]
+project_age_days = 14
+min_age_days = 30
+min_size_mb = 100
+
+[exclusions]
+patterns = [
+    "**/important-project/**",
+    "**/backup/**"
+]
+```
+
+View or modify configuration:
+
+```bash
+# Show current configuration
+sweeper config --show
+
+# Reset to defaults
+sweeper config --reset
+
+# Open config file in editor
+sweeper config --edit
 ```
 
 ## Troubleshooting

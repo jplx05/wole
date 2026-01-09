@@ -72,4 +72,17 @@ mod tests {
         assert_eq!(parse_size("100mb").unwrap(), parse_size("100MB").unwrap());
         assert_eq!(parse_size("1gb").unwrap(), parse_size("1GB").unwrap());
     }
+    
+    #[test]
+    fn test_parse_size_errors() {
+        assert!(parse_size("").is_err());
+        assert!(parse_size("abc").is_err());
+        assert!(parse_size("MB").is_err()); // No number
+    }
+    
+    #[test]
+    fn test_parse_size_decimal() {
+        assert_eq!(parse_size("0.5GB").unwrap(), 536_870_912);
+        assert_eq!(parse_size("2.5MB").unwrap(), 2_621_440);
+    }
 }

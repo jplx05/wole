@@ -2,6 +2,7 @@ use colored::*;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::collections::HashMap;
+use crate::utils;
 
 /// Output verbosity mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +22,10 @@ pub struct ScanResults {
     pub downloads: CategoryResult,
     pub large: CategoryResult,
     pub old: CategoryResult,
+    pub browser: CategoryResult,
+    pub system: CategoryResult,
+    pub empty: CategoryResult,
+    pub duplicates: CategoryResult,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -53,6 +58,10 @@ struct JsonCategories {
     downloads: JsonCategory,
     large: JsonCategory,
     old: JsonCategory,
+    browser: JsonCategory,
+    system: JsonCategory,
+    empty: JsonCategory,
+    duplicates: JsonCategory,
 }
 
 #[derive(Serialize)]
@@ -94,6 +103,10 @@ pub fn print_human(results: &ScanResults, mode: OutputMode) {
         ("Downloads", &results.downloads, "✓ Old files"),
         ("Large", &results.large, "⚠ Review suggested"),
         ("Old", &results.old, "⚠ Review suggested"),
+        ("Browser", &results.browser, "✓ Safe to clean"),
+        ("System", &results.system, "✓ Safe to clean"),
+        ("Empty", &results.empty, "✓ Safe to clean"),
+        ("Duplicates", &results.duplicates, "⚠ Review suggested"),
     ];
     
     for (name, result, status) in categories {
@@ -137,14 +150,22 @@ pub fn print_human(results: &ScanResults, mode: OutputMode) {
         + results.build.items
         + results.downloads.items
         + results.large.items
-        + results.old.items;
+        + results.old.items
+        + results.browser.items
+        + results.system.items
+        + results.empty.items
+        + results.duplicates.items;
     let total_bytes = results.cache.size_bytes
         + results.temp.size_bytes
         + results.trash.size_bytes
         + results.build.size_bytes
         + results.downloads.size_bytes
         + results.large.size_bytes
-        + results.old.size_bytes;
+        + results.old.size_bytes
+        + results.browser.size_bytes
+        + results.system.size_bytes
+        + results.empty.size_bytes
+        + results.duplicates.size_bytes;
     
     println!("{}", "─".repeat(60).dimmed());
     
@@ -225,6 +246,38 @@ pub fn print_json(results: &ScanResults) -> anyhow::Result<()> {
                     .map(|p| p.to_string_lossy().to_string())
                     .collect(),
             },
+            browser: JsonCategory {
+                items: results.browser.items,
+                size_bytes: results.browser.size_bytes,
+                size_human: results.browser.size_human(),
+                paths: results.browser.paths.iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect(),
+            },
+            system: JsonCategory {
+                items: results.system.items,
+                size_bytes: results.system.size_bytes,
+                size_human: results.system.size_human(),
+                paths: results.system.paths.iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect(),
+            },
+            empty: JsonCategory {
+                items: results.empty.items,
+                size_bytes: results.empty.size_bytes,
+                size_human: results.empty.size_human(),
+                paths: results.empty.paths.iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect(),
+            },
+            duplicates: JsonCategory {
+                items: results.duplicates.items,
+                size_bytes: results.duplicates.size_bytes,
+                size_human: results.duplicates.size_human(),
+                paths: results.duplicates.paths.iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect(),
+            },
         },
         summary: JsonSummary {
             total_items: results.cache.items
@@ -233,14 +286,22 @@ pub fn print_json(results: &ScanResults) -> anyhow::Result<()> {
                 + results.build.items
                 + results.downloads.items
                 + results.large.items
-                + results.old.items,
+                + results.old.items
+                + results.browser.items
+                + results.system.items
+                + results.empty.items
+                + results.duplicates.items,
             total_bytes: results.cache.size_bytes
                 + results.temp.size_bytes
                 + results.trash.size_bytes
                 + results.build.size_bytes
                 + results.downloads.size_bytes
                 + results.large.size_bytes
-                + results.old.size_bytes,
+                + results.old.size_bytes
+                + results.browser.size_bytes
+                + results.system.size_bytes
+                + results.empty.size_bytes
+                + results.duplicates.size_bytes,
             total_human: bytesize::to_string(
                 results.cache.size_bytes
                     + results.temp.size_bytes
@@ -248,7 +309,11 @@ pub fn print_json(results: &ScanResults) -> anyhow::Result<()> {
                     + results.build.size_bytes
                     + results.downloads.size_bytes
                     + results.large.size_bytes
-                    + results.old.size_bytes,
+                    + results.old.size_bytes
+                    + results.browser.size_bytes
+                    + results.system.size_bytes
+                    + results.empty.size_bytes
+                    + results.duplicates.size_bytes,
                 true,
             ),
         },
@@ -276,6 +341,10 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
         ("Downloads", &results.downloads),
         ("Large", &results.large),
         ("Old", &results.old),
+        ("Browser", &results.browser),
+        ("System", &results.system),
+        ("Empty", &results.empty),
+        ("Duplicates", &results.duplicates),
     ];
     
     for (name, result) in categories {
@@ -308,6 +377,44 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
                     "".dimmed(), 
                     paths_with_sizes.len() - show_count
                 );
+            }
+            
+            // Special handling for large files: show file type breakdown
+            if name == "Large" && !result.paths.is_empty() {
+                println!();
+                println!("  {} File type breakdown:", "📊".dimmed());
+                let mut type_counts: HashMap<&str, (usize, u64)> = HashMap::new();
+                
+                for path in &result.paths {
+                    let file_type = utils::detect_file_type(path);
+                    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                    let entry = type_counts.entry(file_type.as_str()).or_insert((0, 0));
+                    entry.0 += 1;
+                    entry.1 += size;
+                }
+                
+                let mut type_vec: Vec<(&str, usize, u64)> = type_counts.iter()
+                    .map(|(k, (count, size))| (*k, *count, *size))
+                    .collect();
+                type_vec.sort_by(|a, b| b.2.cmp(&a.2));
+                
+                for (file_type, count, size) in type_vec.iter().take(5) {
+                    let emoji = match *file_type {
+                        "Video" => "🎬",
+                        "Disk Image" => "💿",
+                        "Archive" => "📦",
+                        "Installer" => "📥",
+                        "Database" => "🗃️",
+                        "Backup" => "💾",
+                        _ => "📁",
+                    };
+                    println!("    {} {}: {} files ({})", 
+                        emoji,
+                        file_type.cyan(),
+                        count.to_string().bold(),
+                        bytesize::to_string(*size, true).dimmed()
+                    );
+                }
             }
             
             // Special handling for downloads: show extension breakdown
@@ -399,14 +506,22 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
         + results.build.items
         + results.downloads.items
         + results.large.items
-        + results.old.items;
+        + results.old.items
+        + results.browser.items
+        + results.system.items
+        + results.empty.items
+        + results.duplicates.items;
     let total_bytes = results.cache.size_bytes
         + results.temp.size_bytes
         + results.trash.size_bytes
         + results.build.size_bytes
         + results.downloads.size_bytes
         + results.large.size_bytes
-        + results.old.size_bytes;
+        + results.old.size_bytes
+        + results.browser.size_bytes
+        + results.system.size_bytes
+        + results.empty.size_bytes
+        + results.duplicates.size_bytes;
     
     println!("{}", "━".repeat(60).dimmed());
     println!(
