@@ -1042,10 +1042,7 @@ fn handle_results_event(
             let mut found = None;
 
             for (i, row) in rows.iter().enumerate().skip(start) {
-                if matches!(
-                    row,
-                    crate::tui::state::ResultsRow::CategoryHeader { .. }
-                ) {
+                if matches!(row, crate::tui::state::ResultsRow::CategoryHeader { .. }) {
                     found = Some(i);
                     break;
                 }
@@ -1056,10 +1053,7 @@ fn handle_results_event(
                     .enumerate()
                     .take(app_state.cursor.min(rows.len().saturating_sub(1)) + 1)
                 {
-                    if matches!(
-                        row,
-                        crate::tui::state::ResultsRow::CategoryHeader { .. }
-                    ) {
+                    if matches!(row, crate::tui::state::ResultsRow::CategoryHeader { .. }) {
                         found = Some(i);
                         break;
                     }
@@ -1766,7 +1760,8 @@ fn handle_disk_insights_event(
                 } else {
                     // Navigate back to parent if not at root
                     if let Some(parent) = current_path.parent() {
-                        if parent != insights.root.path.as_path() && parent.starts_with(insights.root.path.as_path())
+                        if parent != insights.root.path.as_path()
+                            && parent.starts_with(insights.root.path.as_path())
                         {
                             *current_path = parent.to_path_buf();
                             *cursor = 0;

@@ -646,17 +646,11 @@ impl AppState {
                                             item_parent.to_path_buf()
                                         };
 
-                                        subfolder_map
-                                            .entry(subdir)
-                                            .or_default()
-                                            .push(*item_idx);
+                                        subfolder_map.entry(subdir).or_default().push(*item_idx);
                                     } else {
                                         // Item is not under common parent - group separately
                                         let folder_name = item_parent.display().to_string();
-                                        folder_map
-                                            .entry(folder_name)
-                                            .or_default()
-                                            .push(*item_idx);
+                                        folder_map.entry(folder_name).or_default().push(*item_idx);
                                     }
                                 } else {
                                     ungrouped_items.push(*item_idx);
@@ -795,10 +789,7 @@ impl AppState {
                                     // Less than 2 items, add as standalone
                                     for (parent_path, items) in group_items {
                                         let folder_name = parent_path.display().to_string();
-                                        folder_map
-                                            .entry(folder_name)
-                                            .or_default()
-                                            .extend(items);
+                                        folder_map.entry(folder_name).or_default().extend(items);
                                     }
                                 }
                             }
@@ -806,10 +797,7 @@ impl AppState {
                             // Add standalone parents
                             for (parent_path, items) in standalone_parents {
                                 let folder_name = parent_path.display().to_string();
-                                folder_map
-                                    .entry(folder_name)
-                                    .or_default()
-                                    .extend(items);
+                                folder_map.entry(folder_name).or_default().extend(items);
                             }
                         }
 
@@ -1497,17 +1485,11 @@ impl AppState {
                                             item_parent.to_path_buf()
                                         };
 
-                                        subfolder_map
-                                            .entry(subdir)
-                                            .or_default()
-                                            .push(*item_idx);
+                                        subfolder_map.entry(subdir).or_default().push(*item_idx);
                                     } else {
                                         // Item is not under common parent - group separately
                                         let folder_name = item_parent.display().to_string();
-                                        folder_map
-                                            .entry(folder_name)
-                                            .or_default()
-                                            .push(*item_idx);
+                                        folder_map.entry(folder_name).or_default().push(*item_idx);
                                     }
                                 } else {
                                     ungrouped_items.push(*item_idx);
@@ -1536,10 +1518,7 @@ impl AppState {
                             for (item_idx, path) in &item_paths {
                                 if let Some(parent) = path.parent() {
                                     let folder_name = parent.display().to_string();
-                                    folder_map
-                                        .entry(folder_name)
-                                        .or_default()
-                                        .push(*item_idx);
+                                    folder_map.entry(folder_name).or_default().push(*item_idx);
                                 } else {
                                     ungrouped_items.push(*item_idx);
                                 }
@@ -1957,18 +1936,12 @@ impl AppState {
                                         item_parent.to_path_buf()
                                     };
 
-                                    subfolder_map
-                                        .entry(subdir)
-                                        .or_default()
-                                        .push(*item_idx);
+                                    subfolder_map.entry(subdir).or_default().push(*item_idx);
                                 } else {
                                     // Item is not under common parent - group separately
                                     let folder_name =
                                         crate::utils::to_relative_path(item_parent, &scan_path);
-                                    folder_map
-                                        .entry(folder_name)
-                                        .or_default()
-                                        .push(*item_idx);
+                                    folder_map.entry(folder_name).or_default().push(*item_idx);
                                 }
                             } else {
                                 ungrouped_items.push(*item_idx);
@@ -2112,10 +2085,7 @@ impl AppState {
                                 for (parent_path, items) in group_items {
                                     let folder_name =
                                         crate::utils::to_relative_path(&parent_path, &scan_path);
-                                    folder_map
-                                        .entry(folder_name)
-                                        .or_default()
-                                        .extend(items);
+                                    folder_map.entry(folder_name).or_default().extend(items);
                                 }
                             }
                         }
@@ -2124,10 +2094,7 @@ impl AppState {
                         for (parent_path, items) in standalone_parents {
                             let folder_name =
                                 crate::utils::to_relative_path(&parent_path, &scan_path);
-                            folder_map
-                                .entry(folder_name)
-                                .or_default()
-                                .extend(items);
+                            folder_map.entry(folder_name).or_default().extend(items);
                         }
                     }
 

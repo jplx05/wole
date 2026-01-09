@@ -350,10 +350,7 @@ pub fn scan_with_config(
 
     // Group by full hash
     for (full_hash, path) in full_hash_results {
-        full_hash_groups
-            .entry(full_hash)
-            .or_default()
-            .push(path);
+        full_hash_groups.entry(full_hash).or_default().push(path);
     }
 
     // Build duplicate groups

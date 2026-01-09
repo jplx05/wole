@@ -199,7 +199,6 @@ pub struct DuplicatesConfig {
     pub buffer_size_bytes: usize,
 }
 
-
 impl Default for Thresholds {
     fn default() -> Self {
         Self {
@@ -209,7 +208,6 @@ impl Default for Thresholds {
         }
     }
 }
-
 
 impl Default for Exclusions {
     fn default() -> Self {
@@ -293,8 +291,6 @@ impl Default for HistorySettings {
         }
     }
 }
-
-
 
 impl Default for DuplicatesConfig {
     fn default() -> Self {

@@ -30,7 +30,8 @@ pub fn scan(_root: &Path, config: &Config) -> Result<CategoryResult> {
                 for entry in entries.filter_map(|e| e.ok()) {
                     let path = entry.path();
                     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        if name.starts_with("thumbcache_") && name.ends_with(".db")
+                        if name.starts_with("thumbcache_")
+                            && name.ends_with(".db")
                             && !config.is_excluded(&path)
                         {
                             if let Ok(metadata) = std::fs::metadata(&path) {
