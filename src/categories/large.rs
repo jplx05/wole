@@ -128,6 +128,11 @@ fn should_skip_entry(entry: &walkdir::DirEntry) -> bool {
     if !entry.file_type().is_dir() {
         return false;
     }
+
+    // Avoid Windows junction/reparse-point cycles (common in OneDrive folders).
+    if utils::is_windows_reparse_point(entry.path()) {
+        return true;
+    }
     
     if let Some(name) = entry.file_name().to_str() {
         // Skip these directories entirely - they're either:

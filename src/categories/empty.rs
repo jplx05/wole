@@ -99,6 +99,10 @@ fn is_dir_empty(path: &Path) -> Result<bool> {
     {
         match entry {
             Ok(entry) => {
+                // Avoid Windows reparse-point cycles when probing emptiness.
+                if entry.file_type().is_dir() && utils::is_windows_reparse_point(entry.path()) {
+                    continue;
+                }
                 if entry.file_type().is_file() {
                     has_files = true;
                     break;
@@ -119,6 +123,11 @@ fn is_dir_empty(path: &Path) -> Result<bool> {
 fn should_skip_entry(entry: &walkdir::DirEntry) -> bool {
     if !entry.file_type().is_dir() {
         return false;
+    }
+
+    // Avoid Windows junction/reparse-point cycles (common in OneDrive folders).
+    if utils::is_windows_reparse_point(entry.path()) {
+        return true;
     }
     
     if let Some(name) = entry.file_name().to_str() {

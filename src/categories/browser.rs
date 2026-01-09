@@ -9,12 +9,25 @@ use walkdir::WalkDir;
 /// Browser cache locations to scan
 /// Each tuple is (name, path_from_localappdata)
 const BROWSER_CACHES: &[(&str, &[&str])] = &[
+    // Chrome family
     ("Chrome", &["Google", "Chrome", "User Data", "Default", "Cache", "Cache_Data"]),
     ("Chrome (Beta)", &["Google", "Chrome Beta", "User Data", "Default", "Cache", "Cache_Data"]),
     ("Chrome (Dev)", &["Google", "Chrome Dev", "User Data", "Default", "Cache", "Cache_Data"]),
+    // Edge family
     ("Edge", &["Microsoft", "Edge", "User Data", "Default", "Cache", "Cache_Data"]),
     ("Edge (Beta)", &["Microsoft", "Edge Beta", "User Data", "Default", "Cache", "Cache_Data"]),
     ("Edge (Dev)", &["Microsoft", "Edge Dev", "User Data", "Default", "Cache", "Cache_Data"]),
+    // Brave
+    ("Brave", &["BraveSoftware", "Brave-Browser", "User Data", "Default", "Cache", "Cache_Data"]),
+    ("Brave (Beta)", &["BraveSoftware", "Brave-Browser-Beta", "User Data", "Default", "Cache", "Cache_Data"]),
+    // Opera
+    ("Opera", &["Opera Software", "Opera Stable", "Cache"]),
+    // Arc
+    ("Arc", &["The Browser Company", "Arc", "User Data", "Default", "Cache", "Cache_Data"]),
+    // Comet
+    ("Comet", &["Comet", "Comet", "User Data", "Default", "Cache", "Cache_Data"]),
+    // Atlast by OpenAI
+    ("Atlas", &["OpenAI", "Atlast", "User Data", "Default", "Cache", "Cache_Data"]),
 ];
 
 /// Scan for browser cache directories

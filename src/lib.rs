@@ -13,3 +13,5 @@ pub mod size;
 pub mod config;
 pub mod progress;
 pub mod utils;
+pub mod analyzer;
+pub mod theme;

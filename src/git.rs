@@ -1,9 +1,8 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use git2::Repository;
-use std::collections::HashMap;
+// git2 dependency REMOVED - causes stack overflow on Windows during static init
+// use git2::Repository;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
 
 // ============================================================================
 // Git Root Cache
@@ -16,24 +15,17 @@ use std::sync::RwLock;
 // a git root and what that root is. This makes repeated lookups O(1).
 // ============================================================================
 
-lazy_static::lazy_static! {
-    /// Cache of directory -> git root mappings
-    /// None value means "we checked and there's no git root"
-    static ref GIT_ROOT_CACHE: RwLock<HashMap<PathBuf, Option<PathBuf>>> = 
-        RwLock::new(HashMap::with_capacity(1000));
-}
+// REMOVED: Static cache causes stack overflow during initialization on Windows
+// Git root caching is disabled for now - slightly slower but stable
 
-/// Clear the git root cache
-/// Call this before a new scan session to ensure fresh results
+/// Clear the git root cache (no-op now that cache is disabled)
 pub fn clear_cache() {
-    if let Ok(mut cache) = GIT_ROOT_CACHE.write() {
-        cache.clear();
-    }
+    // No-op: cache removed to fix stack overflow
 }
 
-/// Find the git root directory with caching
+/// Find the git root directory (cache disabled to avoid stack overflow)
 /// 
-/// This is the preferred method - uses cache for O(1) repeated lookups
+/// Previously cached but cache removed due to Windows stack overflow issues
 pub fn find_git_root_cached(path: &Path) -> Option<PathBuf> {
     // Normalize to parent directory if path is a file
     let dir = if path.is_file() {
@@ -42,26 +34,8 @@ pub fn find_git_root_cached(path: &Path) -> Option<PathBuf> {
         path
     };
     
-    // Check cache first (read lock)
-    {
-        if let Ok(cache) = GIT_ROOT_CACHE.read() {
-            if let Some(result) = cache.get(dir) {
-                return result.clone();
-            }
-        }
-    }
-    
-    // Not in cache, compute it
-    let result = find_git_root(dir);
-    
-    // Store in cache (write lock)
-    {
-        if let Ok(mut cache) = GIT_ROOT_CACHE.write() {
-            cache.insert(dir.to_path_buf(), result.clone());
-        }
-    }
-    
-    result
+    // Cache disabled - just call find_git_root directly
+    find_git_root(dir)
 }
 
 /// Find the git root directory by walking up from the given path
@@ -95,47 +69,17 @@ pub fn find_git_root(path: &Path) -> Option<PathBuf> {
 }
 
 /// Check if a git repository has uncommitted changes (dirty)
-pub fn is_dirty(repo_path: &Path) -> Result<bool> {
-    let repo = match Repository::open(repo_path) {
-        Ok(repo) => repo,
-        Err(_) => return Ok(false), // Not a git repo or can't open - not dirty
-    };
-    
-    let mut status_options = git2::StatusOptions::new();
-    status_options.include_ignored(false);
-    status_options.include_untracked(true);
-    
-    let statuses = match repo.statuses(Some(&mut status_options)) {
-        Ok(statuses) => statuses,
-        Err(_) => return Ok(false), // Can't get status - assume not dirty
-    };
-    
-    // If there are any status entries, the repo is dirty
-    Ok(!statuses.is_empty())
+/// DISABLED: git2 dependency removed due to Windows stack overflow
+pub fn is_dirty(_repo_path: &Path) -> Result<bool> {
+    // git2 removed - always return false
+    Ok(false)
 }
 
 /// Get the date of the last commit in a git repository
-pub fn last_commit_date(repo_path: &Path) -> Result<Option<DateTime<Utc>>> {
-    let repo = match Repository::open(repo_path) {
-        Ok(repo) => repo,
-        Err(_) => return Ok(None), // Not a git repo
-    };
-    
-    let head = match repo.head() {
-        Ok(head) => head,
-        Err(_) => return Ok(None), // No HEAD
-    };
-    
-    let commit = match head.peel_to_commit() {
-        Ok(commit) => commit,
-        Err(_) => return Ok(None), // Can't get commit
-    };
-    
-    let time = commit.time();
-    let datetime = DateTime::from_timestamp(time.seconds(), 0)
-        .unwrap_or_else(|| Utc::now());
-    
-    Ok(Some(datetime))
+/// DISABLED: git2 dependency removed due to Windows stack overflow
+pub fn last_commit_date(_repo_path: &Path) -> Result<Option<DateTime<Utc>>> {
+    // git2 removed - always return None
+    Ok(None)
 }
 
 #[cfg(test)]

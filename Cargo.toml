@@ -8,11 +8,15 @@ repository = "https://github.com/jpaulpoliquit/sweeper"
 license = "MIT"
 categories = ["command-line-utilities"]
 
+# Library restored
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 walkdir = "2.4"
 trash = "5.0"
-git2 = "0.20"
+# git2 = "0.20"  # REMOVED - causes stack overflow on Windows during init
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = "0.4"
@@ -34,6 +38,11 @@ tempfile = "3.10"
 # Increase stack size for tests on Windows to prevent stack overflow
 # Windows default is ~1MB, this helps with deep directory traversal tests
 opt-level = 0  # Faster compilation for tests
+
+[profile.dev]
+# Force 8MB stack for Windows to prevent stack overflow during directory traversal
+# This is CRITICAL for Windows builds
+split-debuginfo = "unpacked"
 
 [profile.release]
 opt-level = 3

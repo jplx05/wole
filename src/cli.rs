@@ -1,17 +1,17 @@
 use clap::{Parser, Subcommand, ArgAction};
 use std::path::PathBuf;
-use colored::Colorize;
 
 use crate::scanner;
 use crate::output::{self, OutputMode};
 use crate::cleaner;
 use crate::size;
 use crate::config::Config;
+use crate::theme::Theme;
 
 #[derive(Parser)]
 #[command(name = "sweeper")]
 #[command(version)]
-#[command(about = "🧹 Clean your Windows machine without fear")]
+#[command(about = "Reclaim disk space on Windows by cleaning unused files")]
 #[command(long_about = "Sweeper is a developer-focused CLI tool that safely identifies and removes \
     unused files to free up disk space.\n\n\
     Examples:\n  \
@@ -275,6 +275,51 @@ impl Cli {
         <Self as Parser>::parse()
     }
     
+    /// Show interactive menu when no command is provided
+    pub fn show_interactive_menu() {
+        println!();
+        println!("{}", Theme::header("Sweeper - Reclaim Disk Space on Windows"));
+        println!("{}", Theme::divider_bold(60));
+        println!();
+        println!("{}", Theme::primary("Available Commands:"));
+        println!();
+        println!("  {}  {}  {}", 
+            Theme::command("scan"), 
+            Theme::muted("or"), 
+            Theme::command("s"),
+        );
+        println!("     {} Find cleanable files (safe, dry-run)", Theme::muted("→"));
+        println!();
+        println!("  {}  {}  {}", 
+            Theme::command("clean"), 
+            Theme::muted("or"), 
+            Theme::command("c"),
+        );
+        println!("     {} Delete files found by scan", Theme::muted("→"));
+        println!();
+        println!("  {}  {}  {}", 
+            Theme::command("analyze"), 
+            Theme::muted("or"), 
+            Theme::command("a"),
+        );
+        println!("     {} Show detailed analysis with file lists", Theme::muted("→"));
+        println!();
+        println!("  {}", Theme::command("config"));
+        println!("     {} View or modify configuration", Theme::muted("→"));
+        println!();
+        println!("{}", Theme::divider(60));
+        println!();
+        println!("{}", Theme::primary("Quick Examples:"));
+        println!();
+        println!("  {} Scan all categories", Theme::command("sweeper scan --all"));
+        println!("  {} Scan specific categories", Theme::command("sweeper scan --cache --temp"));
+        println!("  {} Clean all files", Theme::command("sweeper clean --all -y"));
+        println!("  {} Find large files", Theme::command("sweeper scan --large --min-size 500MB"));
+        println!();
+        println!("{}", Theme::muted("Tip: Use --help with any command for detailed options"));
+        println!();
+    }
+    
     pub fn run(self) -> anyhow::Result<()> {
         let output_mode = if self.quiet {
             OutputMode::Quiet
@@ -287,7 +332,7 @@ impl Cli {
         };
         
         match self.command {
-            Commands::Scan { all, cache, temp, trash, build, downloads, large, old, path, json, project_age, min_age, min_size, exclude } => {
+            Commands::Scan { all, cache, temp, trash, build, downloads, large, old, path, json, project_age, min_age, min_size, exclude: _ } => {
                 // --all enables all categories
                 let (cache, temp, trash, build, downloads, large, old, browser, system, empty, duplicates) = if all {
                     (true, true, true, true, true, true, true, true, true, true, true)
@@ -301,29 +346,37 @@ impl Cli {
                     (cache, temp, trash, build, downloads, large, old, false, false, false, false)
                 };
                 
-                // Default to Documents folder instead of entire home directory
-                // Home directory (especially with OneDrive) can have extremely deep structures
-                // that cause stack overflow even with depth limits
+                
+                // Default to current directory to avoid stack overflow from OneDrive/UserDirs
+                // CRITICAL FIX: Use simple env var instead of directories crate which may cause stack overflow
                 let scan_path = path.unwrap_or_else(|| {
-                    if let Some(user_dirs) = directories::UserDirs::new() {
-                        if let Some(documents) = user_dirs.document_dir() {
-                            documents.to_path_buf()
-                        } else {
-                            user_dirs.home_dir().to_path_buf()
+                    if let Ok(userprofile) = std::env::var("USERPROFILE") {
+                        let base = PathBuf::from(&userprofile);
+                        
+                        // Try OneDrive\Documents first (common on Windows 11)
+                        let onedrive_docs = base.join("OneDrive").join("Documents");
+                        if onedrive_docs.exists() {
+                            return onedrive_docs;
                         }
+                        
+                        // Try regular Documents
+                        let docs = base.join("Documents");
+                        if docs.exists() {
+                            return docs;
+                        }
+                        
+                        // Fallback to user profile root
+                        base
                     } else {
-                        std::env::var("USERPROFILE")
-                            .map(|p| PathBuf::from(p).join("Documents"))
-                            .unwrap_or_else(|_| PathBuf::from("."))
+                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                     }
                 });
                 
                 let min_size_bytes = size::parse_size(&min_size)
                     .map_err(|e| anyhow::anyhow!("Invalid size format '{}': {}", min_size, e))?;
                 
-                // Load config and merge CLI exclusions
-                let mut config = Config::load();
-                config.exclusions.patterns.extend(exclude.iter().cloned());
+                // Load config
+                let config = Config::load();
                 
                 let results = scanner::scan_all(
                     &scan_path,
@@ -470,8 +523,8 @@ impl Cli {
             Commands::Config { show, reset, edit } => {
                 if show {
                     let config = Config::load();
-                    println!("{}", "Current Configuration".bold());
-                    println!("{}", "━".repeat(60).dimmed());
+                    println!("{}", Theme::header("Current Configuration"));
+                    println!("{}", Theme::divider_bold(60));
                     println!();
                     println!("Thresholds:");
                     println!("  Project age: {} days", config.thresholds.project_age_days);
@@ -493,7 +546,7 @@ impl Cli {
                 } else if reset {
                     let default_config = Config::default();
                     default_config.save()?;
-                    println!("{} Configuration reset to defaults.", "✓".green());
+                    println!("{} Configuration reset to defaults.", Theme::success("OK"));
                 } else if edit {
                     if let Ok(path) = Config::config_path() {
                         // Create default config if it doesn't exist
@@ -512,8 +565,8 @@ impl Cli {
                 } else {
                     // Default: show config
                     let config = Config::load();
-                    println!("{}", "Current Configuration".bold());
-                    println!("{}", "━".repeat(60).dimmed());
+                    println!("{}", Theme::header("Current Configuration"));
+                    println!("{}", Theme::divider_bold(60));
                     println!();
                     println!("Thresholds:");
                     println!("  Project age: {} days", config.thresholds.project_age_days);

@@ -1,8 +1,8 @@
-use colored::*;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::collections::HashMap;
 use crate::utils;
+use crate::theme::Theme;
 
 /// Output verbosity mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,42 +85,42 @@ pub fn print_human(results: &ScanResults, mode: OutputMode) {
     }
     
     println!();
-    println!("{}", "🧹 Sweeper Scan Results".bold());
-    println!("{}", "━".repeat(60).dimmed());
+    println!("{}", Theme::header("Sweeper Scan Results"));
+    println!("{}", Theme::divider_bold(60));
     println!();
     println!("{:<15} {:>8} {:>12} {:>20}", 
-        "Category".bold(), 
-        "Items".bold(), 
-        "Size".bold(), 
-        "Status".bold());
-    println!("{}", "─".repeat(60).dimmed());
+        Theme::primary("Category"), 
+        Theme::primary("Items"), 
+        Theme::primary("Size"), 
+        Theme::primary("Status"));
+    println!("{}", Theme::divider(60));
     
     let categories = [
-        ("Cache", &results.cache, "✓ Safe to clean"),
-        ("Temp", &results.temp, "✓ Safe to clean"),
-        ("Trash", &results.trash, "✓ Safe to clean"),
-        ("Build", &results.build, "✓ Inactive projects"),
-        ("Downloads", &results.downloads, "✓ Old files"),
-        ("Large", &results.large, "⚠ Review suggested"),
-        ("Old", &results.old, "⚠ Review suggested"),
-        ("Browser", &results.browser, "✓ Safe to clean"),
-        ("System", &results.system, "✓ Safe to clean"),
-        ("Empty", &results.empty, "✓ Safe to clean"),
-        ("Duplicates", &results.duplicates, "⚠ Review suggested"),
+        ("Cache", &results.cache, "[OK] Safe to clean"),
+        ("Temp", &results.temp, "[OK] Safe to clean"),
+        ("Trash", &results.trash, "[OK] Safe to clean"),
+        ("Build", &results.build, "[OK] Inactive projects"),
+        ("Downloads", &results.downloads, "[OK] Old files"),
+        ("Large", &results.large, "[!] Review suggested"),
+        ("Old", &results.old, "[!] Review suggested"),
+        ("Browser", &results.browser, "[OK] Safe to clean"),
+        ("System", &results.system, "[OK] Safe to clean"),
+        ("Empty", &results.empty, "[OK] Safe to clean"),
+        ("Duplicates", &results.duplicates, "[!] Review suggested"),
     ];
     
     for (name, result, status) in categories {
         if result.items > 0 {
-            let status_colored = if status.starts_with("✓") { 
-                status.green() 
+            let status_colored = if status.starts_with("[OK]") { 
+                Theme::status_safe(status)
             } else { 
-                status.yellow() 
+                Theme::status_review(status)
             };
             println!(
                 "{:<15} {:>8} {:>12} {:>20}",
-                name.cyan(),
-                result.items,
-                result.size_human(),
+                Theme::category(name),
+                Theme::value(&result.items.to_string()),
+                Theme::size(&result.size_human()),
                 status_colored
             );
             
@@ -128,17 +128,17 @@ pub fn print_human(results: &ScanResults, mode: OutputMode) {
             if mode == OutputMode::Verbose && !result.paths.is_empty() {
                 let show_count = std::cmp::min(3, result.paths.len());
                 for path in result.paths.iter().take(show_count) {
-                    println!("  {}", path.display().to_string().dimmed());
+                    println!("  {}", Theme::muted(&path.display().to_string()));
                 }
                 if result.paths.len() > show_count {
-                    println!("  {} ... and {} more", "".dimmed(), result.paths.len() - show_count);
+                    println!("  {} ... and {} more", Theme::muted(""), Theme::muted(&(result.paths.len() - show_count).to_string()));
                 }
             }
             
             // In very verbose mode, show all paths
             if mode == OutputMode::VeryVerbose {
                 for path in &result.paths {
-                    println!("  {}", path.display().to_string().dimmed());
+                    println!("  {}", Theme::muted(&path.display().to_string()));
                 }
             }
         }
@@ -167,20 +167,20 @@ pub fn print_human(results: &ScanResults, mode: OutputMode) {
         + results.empty.size_bytes
         + results.duplicates.size_bytes;
     
-    println!("{}", "─".repeat(60).dimmed());
+    println!("{}", Theme::divider(60));
     
     if total_items == 0 {
-        println!("{}", "✨ Your system is clean! No reclaimable space found.".green());
+        println!("{}", Theme::success("Your system is clean! No reclaimable space found."));
     } else {
         println!(
             "{:<15} {:>8} {:>12} {:>20}",
-            "Total".bold(),
-            total_items.to_string().bold(),
-            bytesize::to_string(total_bytes, true).bold(),
-            "Reclaimable".green()
+            Theme::header("Total"),
+            Theme::value(&total_items.to_string()),
+            Theme::size(&bytesize::to_string(total_bytes, true)),
+            Theme::success("Reclaimable")
         );
         println!();
-        println!("💡 Run {} to remove these files.", "sweeper clean --all".cyan());
+        println!("Run {} to remove these files.", Theme::command("sweeper clean --all"));
     }
     println!();
 }
@@ -329,8 +329,8 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
     }
     
     println!();
-    println!("{}", "📊 Detailed Analysis".bold());
-    println!("{}", "━".repeat(60).dimmed());
+    println!("{}", Theme::header("Detailed Analysis"));
+    println!("{}", Theme::divider_bold(60));
     println!();
     
     let categories = [
@@ -349,8 +349,8 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
     
     for (name, result) in categories {
         if result.items > 0 {
-            println!("{}", format!("{} ({})", name.bold().cyan(), result.size_human()).bold());
-            println!("{}", "─".repeat(60).dimmed());
+            println!("{}", format!("{} ({})", Theme::category(name), Theme::size(&result.size_human())));
+            println!("{}", Theme::divider(60));
             
             // Show all paths with sizes
             let mut paths_with_sizes: Vec<(PathBuf, u64)> = result.paths.iter()
@@ -367,14 +367,14 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
             let show_count = std::cmp::min(10, paths_with_sizes.len());
             for (path, size) in paths_with_sizes.iter().take(show_count) {
                 println!("  {}  {}", 
-                    bytesize::to_string(*size, true).dimmed(),
-                    path.display().to_string().cyan()
+                    bytesize::to_string(*size, true),
+                    path.display().to_string()
                 );
             }
             
             if paths_with_sizes.len() > show_count {
                 println!("  {} ... and {} more files", 
-                    "".dimmed(), 
+                    "", 
                     paths_with_sizes.len() - show_count
                 );
             }
@@ -382,7 +382,7 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
             // Special handling for large files: show file type breakdown
             if name == "Large" && !result.paths.is_empty() {
                 println!();
-                println!("  {} File type breakdown:", "📊".dimmed());
+                println!("  File type breakdown:");
                 let mut type_counts: HashMap<&str, (usize, u64)> = HashMap::new();
                 
                 for path in &result.paths {
@@ -399,20 +399,10 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
                 type_vec.sort_by(|a, b| b.2.cmp(&a.2));
                 
                 for (file_type, count, size) in type_vec.iter().take(5) {
-                    let emoji = match *file_type {
-                        "Video" => "🎬",
-                        "Disk Image" => "💿",
-                        "Archive" => "📦",
-                        "Installer" => "📥",
-                        "Database" => "🗃️",
-                        "Backup" => "💾",
-                        _ => "📁",
-                    };
-                    println!("    {} {}: {} files ({})", 
-                        emoji,
-                        file_type.cyan(),
-                        count.to_string().bold(),
-                        bytesize::to_string(*size, true).dimmed()
+                    println!("    {}: {} files ({})", 
+                        Theme::secondary(file_type),
+                        Theme::value(&count.to_string()),
+                        Theme::muted(&bytesize::to_string(*size, true))
                     );
                 }
             }
@@ -420,7 +410,7 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
             // Special handling for downloads: show extension breakdown
             if name == "Downloads" && !result.paths.is_empty() {
                 println!();
-                println!("  {} Extension breakdown:", "📁".dimmed());
+                println!("  Extension breakdown:");
                 let mut ext_counts: HashMap<String, (usize, u64)> = HashMap::new();
                 
                 for path in &result.paths {
@@ -444,9 +434,9 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
                 
                 for (ext, count, size) in ext_vec.iter().take(5) {
                     println!("    .{}: {} files ({})", 
-                        ext.cyan(),
-                        count.to_string().bold(),
-                        bytesize::to_string(*size, true).dimmed()
+                        Theme::secondary(ext),
+                        Theme::value(&count.to_string()),
+                        Theme::muted(&bytesize::to_string(*size, true))
                     );
                 }
             }
@@ -454,7 +444,7 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
             // Special handling for old files: show age info
             if name == "Old" && !result.paths.is_empty() {
                 println!();
-                println!("  {} Age breakdown:", "📅".dimmed());
+                println!("  Age breakdown:");
                 let mut age_groups: HashMap<String, (usize, u64)> = HashMap::new();
                 
                 for path in &result.paths {
@@ -489,9 +479,9 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
                 
                 for (age, count, size) in &age_vec {
                     println!("    {}: {} files ({})", 
-                        age.cyan(),
-                        count.to_string().bold(),
-                        bytesize::to_string(*size, true).dimmed()
+                        Theme::secondary(age),
+                        Theme::value(&count.to_string()),
+                        Theme::muted(&bytesize::to_string(*size, true))
                     );
                 }
             }
@@ -523,12 +513,11 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
         + results.empty.size_bytes
         + results.duplicates.size_bytes;
     
-    println!("{}", "━".repeat(60).dimmed());
+    println!("{}", Theme::divider_bold(60));
     println!(
-        "{} Total: {} items, {} reclaimable",
-        "📊".bold(),
-        total_items.to_string().bold().cyan(),
-        bytesize::to_string(total_bytes, true).bold().green()
+        "Total: {} items, {} reclaimable",
+        Theme::value(&total_items.to_string()),
+        Theme::success(&bytesize::to_string(total_bytes, true))
     );
     println!();
 }

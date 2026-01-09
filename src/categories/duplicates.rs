@@ -5,7 +5,7 @@ use blake3::Hasher;
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
-use std::io::{Read, BufReader};
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -47,7 +47,7 @@ impl DuplicatesResult {
             paths,
         }
     }
-    
+
     /// Get total items count
     pub fn items(&self) -> usize {
         self.groups.iter().map(|g| g.paths.len()).sum()
@@ -55,25 +55,25 @@ impl DuplicatesResult {
 }
 
 /// Scan for duplicate files in user directories
-/// 
+///
 /// Uses a three-pass approach:
 /// 1. Group files by size (files with unique sizes cannot be duplicates)
 /// 2. For size groups > 1, compute partial hash (first 4KB)
 /// 3. For partial hash matches, compute full hash
 pub fn scan(_root: &Path) -> Result<DuplicatesResult> {
     let mut result = DuplicatesResult::default();
-    
+
     // Get user directories to scan
     let user_dirs = get_user_directories()?;
-    
+
     // Step 1: Group files by size
     let mut size_groups: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    
+
     for dir in user_dirs {
         if !dir.exists() {
             continue;
         }
-        
+
         // Limit depth to prevent stack overflow, especially on Windows with smaller stack size
         const MAX_DEPTH: usize = 20;
         for entry in WalkDir::new(&dir)
@@ -86,37 +86,40 @@ pub fn scan(_root: &Path) -> Result<DuplicatesResult> {
                 Ok(e) => e,
                 Err(_) => continue,
             };
-            
+
             let path = entry.path();
-            
+
             // Only process files
             if !entry.file_type().is_file() {
                 continue;
             }
-            
+
             // Skip hidden files
             if utils::is_hidden(path) {
                 continue;
             }
-            
+
             // Skip system paths
             if utils::is_system_path(path) {
                 continue;
             }
-            
+
             // Get file size
             if let Ok(metadata) = entry.metadata() {
                 let size = metadata.len();
                 if size > 0 {
-                    size_groups.entry(size).or_insert_with(Vec::new).push(path.to_path_buf());
+                    size_groups
+                        .entry(size)
+                        .or_insert_with(Vec::new)
+                        .push(path.to_path_buf());
                 }
             }
         }
     }
-    
+
     // Step 2: For files with same size, compute partial hash
     let mut partial_hash_groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
-    
+
     for (_size, paths) in size_groups {
         // Only check groups with more than one file
         if paths.len() < 2 {
@@ -267,6 +270,11 @@ fn compute_full_hash(path: &Path) -> Result<String> {
 fn should_skip_entry(entry: &walkdir::DirEntry) -> bool {
     if !entry.file_type().is_dir() {
         return false;
+    }
+
+    // Avoid Windows junction/reparse-point cycles (common in OneDrive folders).
+    if utils::is_windows_reparse_point(entry.path()) {
+        return true;
     }
     
     if let Some(name) = entry.file_name().to_str() {

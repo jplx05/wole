@@ -36,8 +36,13 @@ const BUILD_ARTIFACTS: &[&str] = &[
 pub fn scan(root: &Path, project_age_days: u64) -> Result<CategoryResult> {
     let mut result = CategoryResult::default();
     
-    // Find all project roots
-    let project_roots = project::find_project_roots(root);
+    // Check if root itself is a project - if so, only scan that
+    let project_roots = if crate::project::detect_project_type(root).is_some() {
+        vec![root.to_path_buf()]
+    } else {
+        // Walk to find projects
+        project::find_project_roots(root)
+    };
     
     // Collect artifacts with sizes for sorting
     let mut artifacts_with_sizes: Vec<(PathBuf, u64)> = Vec::new();

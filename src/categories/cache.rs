@@ -26,41 +26,35 @@ enum CacheLocation {
 }
 
 /// Scan for package manager cache directories
-/// 
+///
 /// Checks well-known Windows cache locations for various package managers.
 /// Uses shared calculate_dir_size for consistent size calculation.
 pub fn scan(_root: &Path) -> Result<CategoryResult> {
     let mut result = CategoryResult::default();
     let mut paths = Vec::new();
-    
+
     let local_appdata = env::var("LOCALAPPDATA").ok().map(PathBuf::from);
     let userprofile = env::var("USERPROFILE").ok().map(PathBuf::from);
-    
+
     for (_name, location) in CACHE_LOCATIONS {
         let cache_path = match location {
-            CacheLocation::LocalAppData(subpath) => {
-                local_appdata.as_ref().map(|p| p.join(subpath))
-            }
-            CacheLocation::LocalAppDataNested(subpaths) => {
-                local_appdata.as_ref().map(|p| {
-                    let mut path = p.clone();
-                    for subpath in *subpaths {
-                        path = path.join(subpath);
-                    }
-                    path
-                })
-            }
-            CacheLocation::UserProfileNested(subpaths) => {
-                userprofile.as_ref().map(|p| {
-                    let mut path = p.clone();
-                    for subpath in *subpaths {
-                        path = path.join(subpath);
-                    }
-                    path
-                })
-            }
+            CacheLocation::LocalAppData(subpath) => local_appdata.as_ref().map(|p| p.join(subpath)),
+            CacheLocation::LocalAppDataNested(subpaths) => local_appdata.as_ref().map(|p| {
+                let mut path = p.clone();
+                for subpath in *subpaths {
+                    path = path.join(subpath);
+                }
+                path
+            }),
+            CacheLocation::UserProfileNested(subpaths) => userprofile.as_ref().map(|p| {
+                let mut path = p.clone();
+                for subpath in *subpaths {
+                    path = path.join(subpath);
+                }
+                path
+            }),
         };
-        
+
         if let Some(cache_path) = cache_path {
             if cache_path.exists() {
                 let size = utils::calculate_dir_size(&cache_path);
@@ -72,7 +66,7 @@ pub fn scan(_root: &Path) -> Result<CategoryResult> {
             }
         }
     }
-    
+
     // Sort by size descending
     let mut paths_with_sizes: Vec<(PathBuf, u64)> = paths
         .into_iter()
@@ -82,9 +76,9 @@ pub fn scan(_root: &Path) -> Result<CategoryResult> {
         })
         .collect();
     paths_with_sizes.sort_by(|a, b| b.1.cmp(&a.1));
-    
+
     result.paths = paths_with_sizes.into_iter().map(|(p, _)| p).collect();
-    
+
     Ok(result)
 }
 

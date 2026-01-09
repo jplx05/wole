@@ -5,8 +5,7 @@ use crate::git;
 use crate::output::{OutputMode, ScanResults, CategoryResult};
 use crate::progress;
 use anyhow::Result;
-use colored::*;
-use rayon::prelude::*;
+use rayon::prelude::*; // Re-enabled
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -77,37 +76,38 @@ pub fn scan_all(path: &Path, options: ScanOptions, mode: OutputMode, config: &Co
     let scanned_count = AtomicUsize::new(0);
     let path_owned = path.to_path_buf();
     
-    // Run scans in parallel using rayon
+    // Run scans in parallel using rayon (re-enabled now that git2 is removed)
     let scan_results: Vec<(&str, Result<CategoryResult>)> = enabled
         .par_iter()
         .map(|(name, task)| {
-            // Update progress
-            let count = scanned_count.fetch_add(1, Ordering::SeqCst) + 1;
-            if let Some(ref sp) = spinner {
-                sp.set_message(format!("Scanning {} ({}/{})...", name, count, total_categories));
-            }
-            
-            // Execute scan
-            let result = match task {
-                ScanTask::Cache => categories::cache::scan(&path_owned),
-                ScanTask::Temp => categories::temp::scan(&path_owned),
-                ScanTask::Trash => categories::trash::scan(),
-                ScanTask::Build(age) => categories::build::scan(&path_owned, *age),
-                ScanTask::Downloads(age) => categories::downloads::scan(&path_owned, *age),
-                ScanTask::Large(size) => categories::large::scan(&path_owned, *size),
-                ScanTask::Old(age) => categories::old::scan(&path_owned, *age),
-                ScanTask::Browser => categories::browser::scan(&path_owned),
-                ScanTask::System => categories::system::scan(&path_owned),
-                ScanTask::Empty => categories::empty::scan(&path_owned),
-                ScanTask::Duplicates => {
-                    // Duplicates returns a special result type
-                    match categories::duplicates::scan(&path_owned) {
-                        Ok(dup_result) => Ok(dup_result.to_category_result()),
-                        Err(e) => Err(e),
-                    }
+                
+                // Update progress
+                let count = scanned_count.fetch_add(1, Ordering::SeqCst) + 1;
+                if let Some(ref sp) = spinner {
+                    sp.set_message(format!("Scanning {} ({}/{})...", name, count, total_categories));
                 }
-            };
-            
+                
+                // Execute scan
+                let result = match task {
+                    ScanTask::Cache => categories::cache::scan(&path_owned),
+                    ScanTask::Temp => categories::temp::scan(&path_owned),
+                    ScanTask::Trash => categories::trash::scan(),
+                ScanTask::Build(age) => categories::build::scan(&path_owned, *age),
+                    ScanTask::Downloads(age) => categories::downloads::scan(&path_owned, *age),
+                    ScanTask::Large(size) => categories::large::scan(&path_owned, *size),
+                    ScanTask::Old(age) => categories::old::scan(&path_owned, *age),
+                    ScanTask::Browser => categories::browser::scan(&path_owned),
+                    ScanTask::System => categories::system::scan(&path_owned),
+                    ScanTask::Empty => categories::empty::scan(&path_owned),
+                    ScanTask::Duplicates => {
+                        // Duplicates returns a special result type
+                        match categories::duplicates::scan(&path_owned) {
+                            Ok(dup_result) => Ok(dup_result.to_category_result()),
+                            Err(e) => Err(e),
+                        }
+                    }
+                };
+                
             (*name, result)
         })
         .collect();
@@ -133,7 +133,7 @@ pub fn scan_all(path: &Path, options: ScanOptions, mode: OutputMode, config: &Co
             ("duplicates", Ok(r)) => results.duplicates = r,
             (name, Err(e)) => {
                 if mode != OutputMode::Quiet {
-                    eprintln!("{} {} scan failed: {}", "Warning:".yellow(), name, e);
+                    eprintln!("[WARNING] {} scan failed: {}", name, e);
                 }
             }
             _ => {}
@@ -180,43 +180,25 @@ fn filter_exclusions(results: &mut ScanResults, config: &Config) {
     filter_paths(&mut results.empty.paths);
     filter_paths(&mut results.duplicates.paths);
     
-    // Recalculate item counts and sizes after filtering
+    // Recalculate item counts after filtering
+    // NOTE: Size bytes are already correctly set by each scanner
+    // Don't recalculate - calculate_total_size() only works for files, not directories
     results.cache.items = results.cache.paths.len();
-    results.cache.size_bytes = calculate_total_size(&results.cache.paths);
-    
     results.temp.items = results.temp.paths.len();
-    results.temp.size_bytes = calculate_total_size(&results.temp.paths);
-    
     results.trash.items = results.trash.paths.len();
-    // Note: trash.size_bytes remains 0 as size calculation is intentionally skipped
-    // (would require reading from Recycle Bin which is expensive)
-    
     results.build.items = results.build.paths.len();
-    results.build.size_bytes = calculate_total_size(&results.build.paths);
-    
     results.downloads.items = results.downloads.paths.len();
-    results.downloads.size_bytes = calculate_total_size(&results.downloads.paths);
-    
     results.large.items = results.large.paths.len();
-    results.large.size_bytes = calculate_total_size(&results.large.paths);
-    
     results.old.items = results.old.paths.len();
-    results.old.size_bytes = calculate_total_size(&results.old.paths);
-    
     results.browser.items = results.browser.paths.len();
-    results.browser.size_bytes = calculate_total_size(&results.browser.paths);
-    
     results.system.items = results.system.paths.len();
-    results.system.size_bytes = calculate_total_size(&results.system.paths);
-    
     results.empty.items = results.empty.paths.len();
-    results.empty.size_bytes = calculate_total_size(&results.empty.paths);
-    
     results.duplicates.items = results.duplicates.paths.len();
-    results.duplicates.size_bytes = calculate_total_size(&results.duplicates.paths);
 }
 
-/// Calculate total size of paths
+/// Calculate total size of paths (files only - not used for directories)
+/// NOTE: This function is no longer used since each scanner calculates sizes correctly
+#[allow(dead_code)]
 fn calculate_total_size(paths: &[std::path::PathBuf]) -> u64 {
     paths.iter()
         .filter_map(|p| std::fs::metadata(p).ok())

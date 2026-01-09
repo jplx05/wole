@@ -1,8 +1,8 @@
 use crate::categories;
 use crate::output::{OutputMode, ScanResults};
 use crate::progress;
+use crate::theme::Theme;
 use anyhow::{Context, Result};
-use colored::*;
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -41,27 +41,27 @@ pub fn clean_all(
     
     if total_items == 0 {
         if mode != OutputMode::Quiet {
-            println!("{}", "✨ Nothing to clean.".green());
+            println!("{}", Theme::success("Nothing to clean."));
         }
         return Ok(());
     }
     
     if dry_run {
         if mode != OutputMode::Quiet {
-            println!("{}", "🔍 DRY RUN MODE - No files will be deleted".yellow().bold());
+            println!("{}", Theme::warning_msg("DRY RUN MODE - No files will be deleted"));
             println!();
         }
     }
     
     if permanent && mode != OutputMode::Quiet {
-        println!("{}", "⚠️  PERMANENT DELETE MODE - Files will bypass Recycle Bin".red().bold());
+        println!("{}", Theme::error("PERMANENT DELETE MODE - Files will bypass Recycle Bin"));
     }
     
     if !skip_confirm && !dry_run {
         print!(
-            "🗑️  Delete {} items ({})? [y/N]: ",
-            total_items.to_string().cyan().bold(),
-            bytesize::to_string(total_bytes, true).yellow()
+            "Delete {} items ({})? [y/N]: ",
+            Theme::value(&total_items.to_string()),
+            Theme::warning(&bytesize::to_string(total_bytes, true))
         );
         io::stdout().flush()?;
         
@@ -69,7 +69,7 @@ pub fn clean_all(
         io::stdin().read_line(&mut input)?;
         
         if !input.trim().eq_ignore_ascii_case("y") {
-            println!("{}", "Cancelled.".dimmed());
+            println!("{}", Theme::muted("Cancelled."));
             return Ok(());
         }
     }
@@ -103,7 +103,7 @@ pub fn clean_all(
                     Err(e) => {
                         errors += 1;
                         if mode != OutputMode::Quiet {
-                            eprintln!("{} Failed to clean {}: {}", "⚠".yellow(), path.display(), e);
+                            eprintln!("[WARNING] Failed to clean {}: {}", Theme::secondary(&path.display().to_string()), Theme::error(&e.to_string()));
                         }
                     }
                 }
@@ -130,7 +130,7 @@ pub fn clean_all(
                     Err(e) => {
                         errors += 1;
                         if mode != OutputMode::Quiet {
-                            eprintln!("{} Failed to clean {}: {}", "⚠".yellow(), path.display(), e);
+                            eprintln!("[WARNING] Failed to clean {}: {}", Theme::secondary(&path.display().to_string()), Theme::error(&e.to_string()));
                         }
                     }
                 }
@@ -158,7 +158,7 @@ pub fn clean_all(
                 Err(e) => {
                     errors += 1;
                     if mode != OutputMode::Quiet {
-                        eprintln!("{} Failed to empty Recycle Bin: {}", "⚠".yellow(), e);
+                        eprintln!("[WARNING] Failed to empty Recycle Bin: {}", Theme::error(&e.to_string()));
                     }
                 }
             }
@@ -183,7 +183,7 @@ pub fn clean_all(
                     Err(e) => {
                         errors += 1;
                         if mode != OutputMode::Quiet {
-                            eprintln!("{} Failed to clean {}: {}", "⚠".yellow(), path.display(), e);
+                            eprintln!("[WARNING] Failed to clean {}: {}", Theme::secondary(&path.display().to_string()), Theme::error(&e.to_string()));
                         }
                     }
                 }
@@ -210,7 +210,7 @@ pub fn clean_all(
                     Err(e) => {
                         errors += 1;
                         if mode != OutputMode::Quiet {
-                            eprintln!("{} Failed to clean {}: {}", "⚠".yellow(), path.display(), e);
+                            eprintln!("[WARNING] Failed to clean {}: {}", Theme::secondary(&path.display().to_string()), Theme::error(&e.to_string()));
                         }
                     }
                 }
@@ -237,7 +237,7 @@ pub fn clean_all(
                     Err(e) => {
                         errors += 1;
                         if mode != OutputMode::Quiet {
-                            eprintln!("{} Failed to clean {}: {}", "⚠".yellow(), path.display(), e);
+                            eprintln!("[WARNING] Failed to clean {}: {}", Theme::secondary(&path.display().to_string()), Theme::error(&e.to_string()));
                         }
                     }
                 }
@@ -264,7 +264,7 @@ pub fn clean_all(
                     Err(e) => {
                         errors += 1;
                         if mode != OutputMode::Quiet {
-                            eprintln!("{} Failed to clean {}: {}", "⚠".yellow(), path.display(), e);
+                            eprintln!("[WARNING] Failed to clean {}: {}", Theme::secondary(&path.display().to_string()), Theme::error(&e.to_string()));
                         }
                     }
                 }
@@ -291,7 +291,7 @@ pub fn clean_all(
                     Err(e) => {
                         errors += 1;
                         if mode != OutputMode::Quiet {
-                            eprintln!("{} Failed to clean {}: {}", "⚠".yellow(), path.display(), e);
+                            eprintln!("[WARNING] Failed to clean {}: {}", Theme::secondary(&path.display().to_string()), Theme::error(&e.to_string()));
                         }
                     }
                 }
@@ -318,7 +318,7 @@ pub fn clean_all(
                     Err(e) => {
                         errors += 1;
                         if mode != OutputMode::Quiet {
-                            eprintln!("{} Failed to clean {}: {}", "⚠".yellow(), path.display(), e);
+                            eprintln!("[WARNING] Failed to clean {}: {}", Theme::secondary(&path.display().to_string()), Theme::error(&e.to_string()));
                         }
                     }
                 }
@@ -345,7 +345,7 @@ pub fn clean_all(
                     Err(e) => {
                         errors += 1;
                         if mode != OutputMode::Quiet {
-                            eprintln!("{} Failed to clean {}: {}", "⚠".yellow(), path.display(), e);
+                            eprintln!("[WARNING] Failed to clean {}: {}", Theme::secondary(&path.display().to_string()), Theme::error(&e.to_string()));
                         }
                     }
                 }
@@ -372,7 +372,7 @@ pub fn clean_all(
                     Err(e) => {
                         errors += 1;
                         if mode != OutputMode::Quiet {
-                            eprintln!("{} Failed to clean {}: {}", "⚠".yellow(), path.display(), e);
+                            eprintln!("[WARNING] Failed to clean {}: {}", Theme::secondary(&path.display().to_string()), Theme::error(&e.to_string()));
                         }
                     }
                 }
@@ -391,26 +391,23 @@ pub fn clean_all(
         println!();
         if dry_run {
             println!(
-                "{} Dry run complete: {} items would be cleaned ({}), {} errors",
-                "🔍".yellow(),
-                cleaned.to_string().cyan().bold(),
-                bytesize::to_string(cleaned_bytes, true).cyan(),
-                errors.to_string().red()
+                "[DRY RUN] Complete: {} items would be cleaned ({}), {} errors",
+                Theme::value(&cleaned.to_string()),
+                Theme::size(&bytesize::to_string(cleaned_bytes, true)),
+                Theme::error(&errors.to_string())
             );
         } else if errors > 0 {
             println!(
-                "{} Cleanup complete: {} items cleaned ({}), {} errors",
-                "⚠".yellow(),
-                cleaned.to_string().green().bold(),
-                bytesize::to_string(cleaned_bytes, true).green(),
-                errors.to_string().red()
+                "[WARNING] Cleanup complete: {} items cleaned ({}), {} errors",
+                Theme::success(&cleaned.to_string()),
+                Theme::success(&bytesize::to_string(cleaned_bytes, true)),
+                Theme::error(&errors.to_string())
             );
         } else {
             println!(
-                "{} Cleanup complete: {} items cleaned, {} freed!",
-                "✓".green().bold(),
-                cleaned.to_string().green().bold(),
-                bytesize::to_string(cleaned_bytes, true).green().bold()
+                "[OK] Cleanup complete: {} items cleaned, {} freed!",
+                Theme::success(&cleaned.to_string()),
+                Theme::success(&bytesize::to_string(cleaned_bytes, true))
             );
         }
     }

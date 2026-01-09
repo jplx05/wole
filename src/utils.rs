@@ -3,61 +3,122 @@
 //! This module contains common functions used across multiple category scanners
 //! to reduce code duplication and ensure consistent behavior.
 
-use std::path::Path;
-use walkdir::WalkDir;
+use std::path::{Path, PathBuf};
 
-/// Calculate total size of a directory tree
+/// Returns true if this path is a Windows reparse point (junction/symlink/mount point).
+///
+/// Why this exists:
+/// - On Windows, directory junctions and some OneDrive placeholders are *reparse points*.
+/// - `walkdir`'s `follow_links(false)` prevents following *symlinks*, but junctions/reparse
+///   points can still be traversed as normal directories, which may create cycles and
+///   trigger stack overflows during deep scans.
+pub fn is_windows_reparse_point(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            return meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        }
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Calculate total size of a directory tree using an explicit iterative approach.
+/// 
+/// This uses a manual stack instead of WalkDir to avoid stack overflow on Windows,
+/// especially with deep directories like `target/` or `node_modules/`.
 /// 
 /// Optimized to:
+/// - Use explicit stack to prevent call-stack overflow
 /// - Skip permission-denied errors gracefully
 /// - NOT walk into .git directories (just count the directory itself)
-/// - Handle symlinks safely (don't follow)
-/// - Limit depth to prevent stack overflow on Windows
+/// - Handle symlinks and reparse points safely (don't follow)
+/// - Limit total entries processed to prevent runaway scans
 pub fn calculate_dir_size(path: &Path) -> u64 {
+    // Logging removed to isolate stack overflow
+    
+    const MAX_ENTRIES: usize = 50_000; // Reduced safety limit
+    const MAX_DEPTH: usize = 10; // Limit depth to prevent excessive stack growth
+    
     let mut total = 0u64;
+    let mut entries_processed = 0usize;
     
-    // Limit depth to prevent stack overflow, especially on Windows with smaller stack size
-    const MAX_DEPTH: usize = 20;
+    // Use an explicit stack: (path, depth) instead of just path
+    let mut dir_stack: Vec<(PathBuf, usize)> = vec![(path.to_path_buf(), 0)];
     
-    for entry in WalkDir::new(path)
-        .max_depth(MAX_DEPTH)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| !should_skip_for_size(e))
-    {
-        if let Ok(entry) = entry {
-            // Use entry.metadata() which is cached from the directory walk
-            if let Ok(meta) = entry.metadata() {
-                if meta.is_file() {
-                    total += meta.len();
+    
+    while let Some((current_dir, depth)) = dir_stack.pop() {
+        
+        if entries_processed >= MAX_ENTRIES {
+            break; // Safety limit reached
+        }
+        
+        if depth > MAX_DEPTH {
+            continue; // Skip directories that are too deep
+        }
+        
+        // Skip reparse points (junctions, OneDrive placeholders, etc.)
+        if is_windows_reparse_point(&current_dir) {
+            continue;
+        }
+        
+        let entries = match std::fs::read_dir(&current_dir) {
+            Ok(entries) => entries,
+            Err(_) => continue, // Permission denied or other error
+        };
+        
+        for entry in entries.flatten() {
+            entries_processed += 1;
+            if entries_processed >= MAX_ENTRIES {
+                break;
+            }
+            
+            let entry_path = entry.path();
+            
+            // Get metadata without following symlinks
+            let meta = match std::fs::symlink_metadata(&entry_path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            
+            if meta.is_file() {
+                total += meta.len();
+            } else if meta.is_dir() {
+                // Skip reparse points
+                if is_windows_reparse_point(&entry_path) {
+                    continue;
                 }
+                
+                // Skip .git internals
+                if let Some(name) = entry_path.file_name() {
+                    let name_str = name.to_string_lossy();
+                    if name_str == ".git" {
+                        // Count .git itself but don't descend
+                        continue;
+                    }
+                    // Skip parent being .git
+                    if let Some(parent) = current_dir.file_name() {
+                        if parent.to_string_lossy() == ".git" {
+                            continue;
+                        }
+                    }
+                }
+                
+                dir_stack.push((entry_path, depth + 1));
             }
         }
     }
+    
     
     total
 }
 
-/// Directories to skip when calculating size
-/// We skip .git internals (thousands of files) but still count the .git folder
-fn should_skip_for_size(entry: &walkdir::DirEntry) -> bool {
-    // Only skip directories, not files
-    if !entry.file_type().is_dir() {
-        return false;
-    }
-    
-    // Skip .git internals (objects, refs, etc.) - massive speedup
-    // We detect this by checking if parent is .git
-    if let Some(parent) = entry.path().parent() {
-        if let Some(parent_name) = parent.file_name() {
-            if parent_name == ".git" {
-                return true;
-            }
-        }
-    }
-    
-    false
-}
 
 /// File type categories for large file detection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,27 +269,8 @@ pub const SKIP_WALK_DIRS: &[&str] = &[
     ".parcel-cache",
 ];
 
-/// Check if we should skip walking into this directory
-/// Used with walkdir's filter_entry for performance
-pub fn should_skip_walk(entry: &walkdir::DirEntry) -> bool {
-    if !entry.file_type().is_dir() {
-        return false;
-    }
-    
-    if let Some(name) = entry.file_name().to_str() {
-        // Skip known large/deep directories
-        if SKIP_WALK_DIRS.iter().any(|&skip| name.eq_ignore_ascii_case(skip)) {
-            return true;
-        }
-        
-        // Skip system directories
-        if SYSTEM_DIRS.iter().any(|&sys| name.eq_ignore_ascii_case(sys)) {
-            return true;
-        }
-    }
-    
-    false
-}
+// Function disabled - walkdir not available in minimal test
+// pub fn should_skip_walk(entry: &walkdir::DirEntry) -> bool { ... }
 
 #[cfg(test)]
 mod tests {

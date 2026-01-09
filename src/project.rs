@@ -1,8 +1,8 @@
-use crate::git;
+use crate::utils;
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectType {
@@ -50,6 +50,7 @@ pub fn detect_project_type(path: &Path) -> Option<ProjectType> {
 }
 
 /// Get the marker file path for a project type
+#[allow(dead_code)]
 fn get_marker_file(path: &Path, project_type: ProjectType) -> Option<PathBuf> {
     match project_type {
         ProjectType::Node => Some(path.join("package.json")),
@@ -89,32 +90,58 @@ fn get_marker_file(path: &Path, project_type: ProjectType) -> Option<PathBuf> {
 }
 
 /// Check if a project is active (recently modified or has uncommitted changes)
+/// Uses smart heuristics to check multiple indicators of recent activity
 pub fn is_project_active(path: &Path, age_days: u64) -> Result<bool> {
-    // First check if there's a git repo
-    if let Some(git_root) = git::find_git_root(path) {
-        // Check if repo is dirty
-        if let Ok(true) = git::is_dirty(&git_root) {
-            return Ok(true); // Active - has uncommitted changes
-        }
-        
-        // Check last commit date
-        if let Ok(Some(last_commit)) = git::last_commit_date(&git_root) {
-            let cutoff = Utc::now() - Duration::days(age_days as i64);
-            if last_commit > cutoff {
-                return Ok(true); // Active - recent commit
+    let cutoff = Utc::now() - Duration::days(age_days as i64);
+    
+    // Helper to check if file was modified within cutoff
+    let was_modified_recently = |file_path: &Path| -> bool {
+        if let Ok(meta) = std::fs::metadata(file_path) {
+            if let Ok(modified) = meta.modified() {
+                let modified_dt: DateTime<Utc> = modified.into();
+                return modified_dt > cutoff;
             }
+        }
+        false
+    };
+    
+    // Check git index (file-based, no git2 needed)
+    if was_modified_recently(&path.join(".git").join("index")) {
+        return Ok(true);
+    }
+    
+    // Check git HEAD
+    if was_modified_recently(&path.join(".git").join("HEAD")) {
+        return Ok(true);
+    }
+    
+    // Check common project files and lock files
+    let project_files = [
+        "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+        "Cargo.toml", "Cargo.lock",
+        "requirements.txt", "pyproject.toml", "poetry.lock",
+        "build.gradle", "pom.xml",
+        "go.mod", "go.sum",
+        "composer.json", "composer.lock",
+        "Gemfile", "Gemfile.lock",
+    ];
+    
+    for file in &project_files {
+        if was_modified_recently(&path.join(file)) {
+            return Ok(true);
         }
     }
     
-    // Fallback: check project file modification time
-    if let Some(project_type) = detect_project_type(path) {
-        if let Some(marker_file) = get_marker_file(path, project_type) {
-            if let Ok(metadata) = std::fs::metadata(&marker_file) {
-                if let Ok(modified) = metadata.modified() {
-                    let modified_dt: DateTime<Utc> = modified.into();
-                    let cutoff = Utc::now() - Duration::days(age_days as i64);
-                    if modified_dt > cutoff {
-                        return Ok(true); // Active - recent file modification
+    // Check if any source files were modified recently
+    let source_extensions = ["rs", "js", "ts", "tsx", "jsx", "py", "go", "java", "rb", "php", "c", "cpp", "h"];
+    
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten().take(100) { // Limit to first 100 files
+            let entry_path = entry.path();
+            if let Some(ext) = entry_path.extension() {
+                if source_extensions.contains(&ext.to_string_lossy().as_ref()) {
+                    if was_modified_recently(&entry_path) {
+                        return Ok(true);
                     }
                 }
             }
@@ -126,47 +153,108 @@ pub fn is_project_active(path: &Path, age_days: u64) -> Result<bool> {
 
 /// Find all project roots in a directory tree
 /// 
-/// Uses a conservative depth limit to prevent stack overflow on Windows.
-/// For very deep directory structures, consider scanning specific subdirectories instead.
+/// Uses an explicit stack-based iteration to prevent stack overflow on Windows.
+/// Rayon threads have smaller stacks, and WalkDir can still overflow on deep/wide trees.
 pub fn find_project_roots(root: &Path) -> Vec<PathBuf> {
-    // Safety check: warn if scanning a very large directory tree
-    if root.components().count() > 10 {
-        // Path is already very deep, limit scanning even more
-        eprintln!("Warning: Scanning very deep path. Consider using a more specific directory.");
+    // Skip if root itself is a project (avoid scanning into it)
+    if detect_project_type(root).is_some() {
+        return vec![root.to_path_buf()];
     }
     
-    let mut projects = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    
-    // Use a very conservative depth limit to prevent stack overflow
-    // Windows has smaller default stack sizes, and scanning user directories
-    // can have extremely deep nested structures
     const MAX_DEPTH: usize = 5;
-    for entry in WalkDir::new(root)
-        .max_depth(MAX_DEPTH) // Limit depth to avoid excessive scanning and stack overflow
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        
-        // Skip if we've already seen a parent of this path
-        let mut is_subproject = false;
-        for existing in &projects {
-            if path.starts_with(existing) && path != existing {
-                is_subproject = true;
-                break;
-            }
+    const MAX_ENTRIES: usize = 50_000;
+    
+    let mut projects = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut entries_processed = 0usize;
+    
+    // Use explicit stack: (path, current_depth)
+    let mut dir_stack: Vec<(PathBuf, usize)> = vec![(root.to_path_buf(), 0)];
+    
+    // Limit stack size to prevent excessive memory usage
+    const MAX_STACK_SIZE: usize = 1_000; // Reduced from 10k
+    
+    while let Some((current_dir, depth)) = dir_stack.pop() {
+        if entries_processed >= MAX_ENTRIES {
+            break;
         }
-        if is_subproject {
+        
+        if depth > MAX_DEPTH {
             continue;
         }
         
-        // Check if this is a project root
-        if let Some(_project_type) = detect_project_type(path) {
-            // Make sure we haven't already added this project
-            if !seen.contains(path) {
-                projects.push(path.to_path_buf());
-                seen.insert(path.to_path_buf());
+        // Skip reparse points (junctions, OneDrive placeholders, etc.)
+        if utils::is_windows_reparse_point(&current_dir) {
+            continue;
+        }
+        
+        // Skip system directories
+        if utils::is_system_path(&current_dir) {
+            continue;
+        }
+        
+        // Check if this directory is a project root
+        if let Some(_project_type) = detect_project_type(&current_dir) {
+            if !seen.contains(&current_dir) {
+                // Check it's not a subproject of an already-found project
+                let is_subproject = projects.iter().any(|p| current_dir.starts_with(p) && current_dir != *p);
+                if !is_subproject {
+                    projects.push(current_dir.clone());
+                    seen.insert(current_dir.clone());
+                }
+            }
+            // Don't descend into projects - we found the root
+            continue;
+        }
+        
+        // Read directory entries
+        let entries = match std::fs::read_dir(&current_dir) {
+            Ok(entries) => entries,
+            Err(_) => continue, // Permission denied or other error
+        };
+        
+        for entry in entries.flatten() {
+            entries_processed += 1;
+            if entries_processed >= MAX_ENTRIES {
+                break;
+            }
+            
+            let entry_path = entry.path();
+            
+            // Only process directories
+            let meta = match std::fs::symlink_metadata(&entry_path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            
+            if !meta.is_dir() {
+                continue;
+            }
+            
+            // Skip reparse points
+            if utils::is_windows_reparse_point(&entry_path) {
+                continue;
+            }
+            
+            // Skip known deep/large directories that aren't project roots
+            if let Some(name) = entry_path.file_name() {
+                let name_str = name.to_string_lossy();
+                let skip = matches!(name_str.to_lowercase().as_str(),
+                    "node_modules" | ".git" | ".hg" | ".svn" | "target" |
+                    ".gradle" | "__pycache__" | ".venv" | "venv" |
+                    ".next" | ".nuxt" | ".turbo" | ".parcel-cache" |
+                    "$recycle.bin" | "system volume information" |
+                    "windows" | "program files" | "program files (x86)" |
+                    "programdata" | "appdata"
+                );
+                if skip {
+                    continue;
+                }
+            }
+            
+            // Limit stack size to prevent excessive memory growth
+            if dir_stack.len() < MAX_STACK_SIZE {
+                dir_stack.push((entry_path, depth + 1));
             }
         }
     }
