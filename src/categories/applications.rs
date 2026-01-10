@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -300,16 +300,16 @@ pub fn scan(_root: &Path, config: &Config, output_mode: OutputMode) -> Result<Ca
 
         // Sort by "last opened" (most recent first), then by size descending
         apps_with_sizes.sort_by(|a, b| {
-            let a_key =
-                a.last_opened
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-            let b_key =
-                b.last_opened
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+            let a_key = a
+                .last_opened
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let b_key = b
+                .last_opened
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             b_key.cmp(&a_key).then_with(|| b.size.cmp(&a.size))
         });
 
@@ -453,10 +453,7 @@ pub fn scan_with_progress(
             } else {
                 // Verify directory still exists before calculating size
                 if app.install_location.exists() && app.install_location.is_dir() {
-                    crate::utils::calculate_dir_size_with_progress(
-                        &app.install_location,
-                        &on_path,
-                    )
+                    crate::utils::calculate_dir_size_with_progress(&app.install_location, &on_path)
                 } else {
                     // Directory was deleted/moved since registry read - skip this app
                     continue;
@@ -489,16 +486,16 @@ pub fn scan_with_progress(
 
         // Sort by "last opened" (most recent first), then by size descending
         apps_with_sizes.sort_by(|a, b| {
-            let a_key =
-                a.last_opened
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-            let b_key =
-                b.last_opened
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+            let a_key = a
+                .last_opened
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let b_key = b
+                .last_opened
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             b_key.cmp(&a_key).then_with(|| b.size.cmp(&a.size))
         });
 
@@ -814,7 +811,7 @@ fn sanitize_windows_component(s: &str) -> String {
     // Avoid wild deletions; keep it filesystem-friendly.
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.' ) {
+        if ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.') {
             out.push(ch);
         }
     }
@@ -934,8 +931,13 @@ pub fn get_app_artifact_paths(install_location: &Path) -> Vec<PathBuf> {
         let mut out: HashSet<PathBuf> = HashSet::new();
         out.insert(install_location.to_path_buf());
 
-        let display_name = get_app_display_name(install_location)
-            .unwrap_or_else(|| install_location.file_name().and_then(|n| n.to_str()).unwrap_or("Application").to_string());
+        let display_name = get_app_display_name(install_location).unwrap_or_else(|| {
+            install_location
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Application")
+                .to_string()
+        });
         let display_leaf = sanitize_windows_component(&display_name);
         let display_leaf_ok = !display_leaf.is_empty() && !is_generic_component(&display_leaf);
 
@@ -964,8 +966,8 @@ pub fn get_app_artifact_paths(install_location: &Path) -> Vec<PathBuf> {
             if install_lower.starts_with(&root_lower) {
                 let rel = &install_str[root_lower.len()..];
                 let mut comps = rel.split('\\').filter(|c| !c.is_empty());
-                vendor = comps.next().map(|s| sanitize_windows_component(s));
-                product = comps.next().map(|s| sanitize_windows_component(s));
+                vendor = comps.next().map(sanitize_windows_component);
+                product = comps.next().map(sanitize_windows_component);
                 break;
             }
         }
@@ -976,9 +978,13 @@ pub fn get_app_artifact_paths(install_location: &Path) -> Vec<PathBuf> {
         let vendor_ok = !vendor.is_empty() && !is_generic_component(&vendor);
         let product_ok = !product.is_empty() && !is_generic_component(&product);
 
-        for base in [local_appdata.clone(), roaming_appdata.clone(), program_data.clone()]
-            .into_iter()
-            .flatten()
+        for base in [
+            local_appdata.clone(),
+            roaming_appdata.clone(),
+            program_data.clone(),
+        ]
+        .into_iter()
+        .flatten()
         {
             if vendor_ok && product_ok {
                 // Tighten: only delete a *vendor/product* leaf, not vendor roots or generic names.
@@ -1061,7 +1067,9 @@ pub fn uninstall(install_location: &Path) -> Result<()> {
 
         let Some(raw_cmd) = get_app_uninstall_string(install_location) else {
             // Some registry entries have no uninstall command; caller can fall back to file deletion.
-            return Err(anyhow!("No uninstall command available for this application"));
+            return Err(anyhow!(
+                "No uninstall command available for this application"
+            ));
         };
 
         // If it looks like MSI, prefer a known-safe silent uninstall.
@@ -1073,7 +1081,10 @@ pub fn uninstall(install_location: &Path) -> Result<()> {
                 if status.success() {
                     return Ok(());
                 }
-                return Err(anyhow!("MSI uninstall failed (exit code: {:?})", status.code()));
+                return Err(anyhow!(
+                    "MSI uninstall failed (exit code: {:?})",
+                    status.code()
+                ));
             }
         }
 

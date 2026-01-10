@@ -822,6 +822,7 @@ mod tests {
             restored_bytes: 1024 * 1024, // 1 MiB
             errors: 1,
             not_found: 2,
+            error_reasons: vec![],
         };
 
         let summary = result.summary();

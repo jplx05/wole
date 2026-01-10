@@ -1291,8 +1291,8 @@ fn handle_results_event(
                         }
                     }
                     let mut end: usize = rows.len();
-                    for i in (cursor + 1)..rows.len() {
-                        if matches!(rows[i], ResultsRow::CategoryHeader { .. }) {
+                    for (i, row) in rows.iter().enumerate().skip(cursor + 1) {
+                        if matches!(row, ResultsRow::CategoryHeader { .. }) {
                             end = i;
                             break;
                         }
@@ -1305,33 +1305,33 @@ fn handle_results_event(
                     let mut depth_by_row: HashMap<usize, usize> = HashMap::new();
                     let mut last_folder_at_depth: Vec<Option<usize>> = Vec::new(); // folder_idx by depth
 
-                    for row_i in start..end {
+                    for (row_i, row) in rows.iter().enumerate().take(end).skip(start) {
                         let ResultsRow::FolderHeader {
                             group_idx: g,
                             folder_idx,
                             depth,
-                        } = rows[row_i]
+                        } = row
                         else {
                             continue;
                         };
-                        if g != group_idx {
+                        if *g != group_idx {
                             continue;
                         }
 
-                        if last_folder_at_depth.len() <= depth {
-                            last_folder_at_depth.resize(depth + 1, None);
+                        if last_folder_at_depth.len() <= *depth {
+                            last_folder_at_depth.resize(*depth + 1, None);
                         }
-                        let parent = if depth == 0 {
+                        let parent = if *depth == 0 {
                             None
                         } else {
-                            last_folder_at_depth.get(depth - 1).copied().flatten()
+                            last_folder_at_depth.get(*depth - 1).copied().flatten()
                         };
 
                         parent_by_row.insert(row_i, parent);
-                        folder_idx_by_row.insert(row_i, folder_idx);
-                        depth_by_row.insert(row_i, depth);
+                        folder_idx_by_row.insert(row_i, *folder_idx);
+                        depth_by_row.insert(row_i, *depth);
 
-                        last_folder_at_depth[depth] = Some(folder_idx);
+                        last_folder_at_depth[*depth] = Some(*folder_idx);
                         last_folder_at_depth.truncate(depth + 1);
                     }
 
@@ -1351,7 +1351,9 @@ fn handle_results_event(
                                 let parent = parent_by_row.get(&cursor).copied().unwrap_or(None);
                                 (depth, parent)
                             }
-                            Some(ResultsRow::Item { depth: item_depth, .. }) if item_depth > 0 => {
+                            Some(ResultsRow::Item {
+                                depth: item_depth, ..
+                            }) if item_depth > 0 => {
                                 let want_parent_depth = item_depth - 1;
                                 let mut parent_row: Option<usize> = None;
                                 for i in (start..cursor).rev() {
@@ -1374,7 +1376,8 @@ fn handle_results_event(
 
                                 let parent_folder_idx =
                                     folder_idx_by_row.get(&parent_row).copied().unwrap_or(0);
-                                let parent_depth = depth_by_row.get(&parent_row).copied().unwrap_or(0);
+                                let parent_depth =
+                                    depth_by_row.get(&parent_row).copied().unwrap_or(0);
                                 let parent_parent =
                                     parent_by_row.get(&parent_row).copied().unwrap_or(None);
 
@@ -1391,21 +1394,21 @@ fn handle_results_event(
 
                     // Collect sibling folder indices at the target level.
                     let mut siblings: Vec<usize> = Vec::new();
-                    for row_i in start..end {
+                    for (row_i, row) in rows.iter().enumerate().take(end).skip(start) {
                         let ResultsRow::FolderHeader {
                             group_idx: g,
                             folder_idx,
                             depth,
-                        } = rows[row_i]
+                        } = row
                         else {
                             continue;
                         };
-                        if g != group_idx || depth != target_depth {
+                        if *g != group_idx || *depth != target_depth {
                             continue;
                         }
                         let parent = parent_by_row.get(&row_i).copied().unwrap_or(None);
                         if parent == target_parent_folder_idx {
-                            siblings.push(folder_idx);
+                            siblings.push(*folder_idx);
                         }
                     }
 
@@ -1872,8 +1875,8 @@ fn handle_confirm_event(
                             }
                         }
                         let mut end: usize = rows.len();
-                        for i in (app_state.cursor + 1)..rows.len() {
-                            if matches!(rows[i], ConfirmRow::CategoryHeader { .. }) {
+                        for (i, row) in rows.iter().enumerate().skip(app_state.cursor + 1) {
+                            if matches!(row, ConfirmRow::CategoryHeader { .. }) {
                                 end = i;
                                 break;
                             }
@@ -1885,33 +1888,33 @@ fn handle_confirm_event(
                         let mut depth_by_row: HashMap<usize, usize> = HashMap::new();
                         let mut last_folder_at_depth: Vec<Option<usize>> = Vec::new();
 
-                        for row_i in start..end {
+                        for (row_i, row) in rows.iter().enumerate().take(end).skip(start) {
                             let ConfirmRow::FolderHeader {
                                 cat_idx: c,
                                 folder_idx,
                                 depth,
-                            } = rows[row_i]
+                            } = row
                             else {
                                 continue;
                             };
-                            if c != cat_idx {
+                            if *c != cat_idx {
                                 continue;
                             }
 
-                            if last_folder_at_depth.len() <= depth {
-                                last_folder_at_depth.resize(depth + 1, None);
+                            if last_folder_at_depth.len() <= *depth {
+                                last_folder_at_depth.resize(*depth + 1, None);
                             }
-                            let parent = if depth == 0 {
+                            let parent = if *depth == 0 {
                                 None
                             } else {
-                                last_folder_at_depth.get(depth - 1).copied().flatten()
+                                last_folder_at_depth.get(*depth - 1).copied().flatten()
                             };
 
                             parent_by_row.insert(row_i, parent);
-                            folder_idx_by_row.insert(row_i, folder_idx);
-                            depth_by_row.insert(row_i, depth);
+                            folder_idx_by_row.insert(row_i, *folder_idx);
+                            depth_by_row.insert(row_i, *depth);
 
-                            last_folder_at_depth[depth] = Some(folder_idx);
+                            last_folder_at_depth[*depth] = Some(*folder_idx);
                             last_folder_at_depth.truncate(depth + 1);
                         }
 
@@ -1919,22 +1922,23 @@ fn handle_confirm_event(
                         let (target_depth, target_parent_folder_idx): (usize, Option<usize>) =
                             match rows.get(app_state.cursor).copied() {
                                 Some(ConfirmRow::FolderHeader {
-                                    cat_idx: c,
-                                    depth,
-                                    ..
+                                    cat_idx: c, depth, ..
                                 }) if c == cat_idx => {
-                                    let parent =
-                                        parent_by_row.get(&app_state.cursor).copied().unwrap_or(None);
+                                    let parent = parent_by_row
+                                        .get(&app_state.cursor)
+                                        .copied()
+                                        .unwrap_or(None);
                                     (depth, parent)
                                 }
-                                Some(ConfirmRow::Item { depth: item_depth, .. })
-                                    if item_depth > 0 =>
-                                {
+                                Some(ConfirmRow::Item {
+                                    depth: item_depth, ..
+                                }) if item_depth > 0 => {
                                     let want_parent_depth = item_depth - 1;
                                     let mut parent_row: Option<usize> = None;
                                     for i in (start..app_state.cursor).rev() {
-                                        let ConfirmRow::FolderHeader { cat_idx: c, depth, .. } =
-                                            rows[i]
+                                        let ConfirmRow::FolderHeader {
+                                            cat_idx: c, depth, ..
+                                        } = rows[i]
                                         else {
                                             continue;
                                         };
@@ -1967,21 +1971,21 @@ fn handle_confirm_event(
 
                         // Collect sibling folder indices at the target level.
                         let mut siblings: Vec<usize> = Vec::new();
-                        for row_i in start..end {
+                        for (row_i, row) in rows.iter().enumerate().take(end).skip(start) {
                             let ConfirmRow::FolderHeader {
                                 cat_idx: c,
                                 folder_idx,
                                 depth,
-                            } = rows[row_i]
+                            } = row
                             else {
                                 continue;
                             };
-                            if c != cat_idx || depth != target_depth {
+                            if *c != cat_idx || *depth != target_depth {
                                 continue;
                             }
                             let parent = parent_by_row.get(&row_i).copied().unwrap_or(None);
                             if parent == target_parent_folder_idx {
-                                siblings.push(folder_idx);
+                                siblings.push(*folder_idx);
                             }
                         }
                         if siblings.is_empty() {
@@ -1989,7 +1993,8 @@ fn handle_confirm_event(
                         }
 
                         // Toggle in confirm cache (render source) and mirror to category_groups.
-                        if let Some(cached_group) = app_state.confirm_groups_cache.get_mut(cat_idx) {
+                        if let Some(cached_group) = app_state.confirm_groups_cache.get_mut(cat_idx)
+                        {
                             let any_expanded = siblings
                                 .iter()
                                 .filter_map(|&idx| cached_group.folder_groups.get(idx))
@@ -2005,7 +2010,11 @@ fn handle_confirm_event(
 
                             // Mirror to backing category_groups by matching folder_name
                             let cat_name = cached_group.name.clone();
-                            if let Some(orig_group) = app_state.category_groups.iter_mut().find(|g| g.name == cat_name) {
+                            if let Some(orig_group) = app_state
+                                .category_groups
+                                .iter_mut()
+                                .find(|g| g.name == cat_name)
+                            {
                                 for &idx in &siblings {
                                     if let Some(folder_name) = cached_group
                                         .folder_groups

@@ -26,8 +26,8 @@ use crate::cleaner;
 use crate::cli::ScanOptions;
 use crate::config::Config;
 use crate::restore;
-use crate::scanner;
 use crate::scan_events::ScanProgressEvent;
+use crate::scanner;
 
 /// Run the TUI application
 pub fn run(initial_state: Option<AppState>) -> Result<()> {
@@ -78,7 +78,7 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
                 use crate::status::gather_disk_breakdown_cached_only;
                 use std::sync::atomic::{AtomicBool, Ordering};
                 static DISK_BREAKDOWN_TRIGGERED: AtomicBool = AtomicBool::new(false);
-                
+
                 // Check if we need to trigger background scan (only once per session)
                 if !DISK_BREAKDOWN_TRIGGERED.load(Ordering::Relaxed) {
                     if gather_disk_breakdown_cached_only().is_none() {
@@ -89,7 +89,7 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
                     DISK_BREAKDOWN_TRIGGERED.store(true, Ordering::Relaxed);
                 }
             }
-            
+
             if last_refresh.elapsed().as_secs() >= 2 {
                 use crate::status::gather_status;
                 use sysinfo::System;
@@ -545,7 +545,10 @@ fn perform_scan_with_progress(
                 "System Cache" => (results.system.items, results.system.size_bytes),
                 "Empty Folders" => (results.empty.items, results.empty.size_bytes),
                 "Duplicates" => (results.duplicates.items, results.duplicates.size_bytes),
-                "Windows Update" => (results.windows_update.items, results.windows_update.size_bytes),
+                "Windows Update" => (
+                    results.windows_update.items,
+                    results.windows_update.size_bytes,
+                ),
                 "Event Logs" => (results.event_logs.items, results.event_logs.size_bytes),
                 _ => (0, 0),
             };
@@ -710,12 +713,8 @@ fn perform_scan_with_progress(
     let (result_tx, result_rx) = std::sync::mpsc::channel();
     let (progress_tx, progress_rx) = std::sync::mpsc::channel();
     let _scan_handle = std::thread::spawn(move || {
-        let result = scanner::scan_all_with_progress(
-            &scan_path,
-            scan_options,
-            &scan_config,
-            &progress_tx,
-        );
+        let result =
+            scanner::scan_all_with_progress(&scan_path, scan_options, &scan_config, &progress_tx);
         let _ = result_tx.send(result);
     });
 
@@ -1423,7 +1422,7 @@ fn perform_cleanup(
         // Track last tick update for continuous animation
         let mut last_tick_update = std::time::Instant::now();
 
-        for (_batch_idx, batch_chunk) in paths.chunks(BATCH_SIZE).enumerate() {
+        for batch_chunk in paths.chunks(BATCH_SIZE) {
             // Update UI to show batch deletion progress
             if let crate::tui::state::Screen::Cleaning { ref mut progress } = app_state.screen {
                 progress.current_category = format!("Batch deleting {} files...", paths.len());

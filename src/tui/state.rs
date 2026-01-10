@@ -2,7 +2,7 @@
 
 use crate::output::ScanResults;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 #[derive(Debug, Clone)]
@@ -361,7 +361,7 @@ fn is_ancestor_folder_key(ancestor: &str, child: &str) -> bool {
     child.starts_with(&format!("{}/", ancestor))
 }
 
-fn folder_key_for_display(scan_path: &PathBuf, folder_name: &str) -> String {
+fn folder_key_for_display(scan_path: &Path, folder_name: &str) -> String {
     if folder_name == "(root)" {
         return "(root)".to_string();
     }
@@ -370,7 +370,7 @@ fn folder_key_for_display(scan_path: &PathBuf, folder_name: &str) -> String {
 }
 
 fn build_folder_hierarchy(
-    scan_path: &PathBuf,
+    scan_path: &Path,
     group_name: &str,
     folder_groups: &[FolderGroup],
 ) -> FolderHierarchy {
@@ -417,9 +417,9 @@ fn build_folder_hierarchy(
 
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut roots: Vec<usize> = Vec::new();
-    for idx in 0..n {
-        if let Some(p) = parent[idx] {
-            children[p].push(idx);
+    for (idx, p) in parent.iter().enumerate().take(n) {
+        if let Some(parent_idx) = p {
+            children[*parent_idx].push(idx);
         } else {
             roots.push(idx);
         }
@@ -1607,6 +1607,7 @@ impl AppState {
                             has
                         }
 
+                        #[allow(clippy::too_many_arguments)]
                         fn push_filtered_folder_rows(
                             rows: &mut Vec<ResultsRow>,
                             group_idx: usize,

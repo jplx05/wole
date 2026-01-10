@@ -8,8 +8,8 @@ use bytesize;
 use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 
 /// Application cache locations to scan
 /// Each tuple is (name, path_from_localappdata_or_appdata)

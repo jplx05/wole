@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[cfg(windows)]
@@ -174,7 +174,7 @@ fn list_startup_folder() -> Result<Vec<StartupProgram>> {
 }
 
 #[cfg(windows)]
-fn resolve_shortcut(lnk_path: &PathBuf) -> Option<String> {
+fn resolve_shortcut(lnk_path: &Path) -> Option<String> {
     // Try to use PowerShell to resolve shortcut target
     let script = format!(
         r#"$shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut('{}'); $shortcut.TargetPath"#,

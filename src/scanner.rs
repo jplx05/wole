@@ -378,24 +378,24 @@ pub fn scan_all_with_progress(
             };
 
             let result = match job.task {
-                ScanTask::Cache => categories::cache::scan_with_progress(
-                    &path_owned,
-                    config,
-                    tx,
-                ),
+                ScanTask::Cache => categories::cache::scan_with_progress(&path_owned, config, tx),
                 ScanTask::AppCache => {
                     categories::app_cache::scan_with_progress(&path_owned, config, tx)
                 }
-                ScanTask::Temp => {
-                    categories::temp::scan_with_progress(&path_owned, config, tx)
-                }
+                ScanTask::Temp => categories::temp::scan_with_progress(&path_owned, config, tx),
                 ScanTask::Trash => {
                     send_started();
                     categories::trash::scan()
                 }
                 ScanTask::Build(age) => {
                     send_started();
-                    categories::build::scan(&path_owned, age, Some(&build_config), config, OutputMode::Quiet)
+                    categories::build::scan(
+                        &path_owned,
+                        age,
+                        Some(&build_config),
+                        config,
+                        OutputMode::Quiet,
+                    )
                 }
                 ScanTask::Downloads(age) => {
                     send_started();
@@ -451,10 +451,7 @@ pub fn scan_all_with_progress(
             if let Ok(ref category_result) = result {
                 if !matches!(
                     job.task,
-                    ScanTask::Cache
-                        | ScanTask::AppCache
-                        | ScanTask::Temp
-                        | ScanTask::Applications
+                    ScanTask::Cache | ScanTask::AppCache | ScanTask::Temp | ScanTask::Applications
                 ) {
                     let _ = tx.send(ScanProgressEvent::CategoryFinished {
                         category: display.to_string(),
@@ -660,6 +657,8 @@ mod tests {
             system: false,
             empty: false,
             duplicates: false,
+            windows_update: false,
+            event_logs: false,
             project_age_days: 14,
             min_age_days: 30,
             min_size_bytes: 100 * 1024 * 1024,

@@ -107,7 +107,13 @@ pub fn scan_with_progress(
 
     for (idx, root) in temp_roots.iter().enumerate() {
         if root.exists() {
-            scan_temp_dir(root, &cutoff, &mut files_with_sizes, config, Some(&reporter));
+            scan_temp_dir(
+                root,
+                &cutoff,
+                &mut files_with_sizes,
+                config,
+                Some(&reporter),
+            );
         }
         let _ = tx.send(ScanProgressEvent::CategoryProgress {
             category: CATEGORY.to_string(),

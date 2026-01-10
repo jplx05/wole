@@ -62,12 +62,11 @@ impl ScanPathReporter {
         let last = self.last_emit_ms.load(Ordering::Relaxed);
         if last == 0 {
             self.last_emit_ms.store(now_ms, Ordering::Relaxed);
-        } else if now_ms.saturating_sub(last) < self.min_interval_ms {
-            return;
-        } else if self
-            .last_emit_ms
-            .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
+        } else if now_ms.saturating_sub(last) < self.min_interval_ms
+            || self
+                .last_emit_ms
+                .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
         {
             return;
         }
