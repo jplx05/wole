@@ -1,12 +1,14 @@
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::Duration;
 
+use crate::spinner;
+
 /// Create a spinner for indeterminate progress
 pub fn create_spinner(msg: &str) -> ProgressBar {
     let pb = ProgressBar::new_spinner();
     pb.set_style(
         ProgressStyle::default_spinner()
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+            .tick_chars(spinner::spinner_chars())
             .template("{spinner:.cyan} {msg}")
             .unwrap(),
     );

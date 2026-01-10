@@ -17,12 +17,7 @@ use ratatui::{
     Frame,
 };
 
-/// Spinner frames for animation
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-fn get_spinner(tick: u64) -> &'static str {
-    SPINNER_FRAMES[(tick as usize / 2) % SPINNER_FRAMES.len()]
-}
+use crate::spinner;
 
 /// Generate a short fun comparison for the amount of space found
 fn fun_comparison_short(bytes: u64) -> Option<String> {
@@ -53,17 +48,26 @@ fn fun_comparison_short(bytes: u64) -> Option<String> {
 
 pub fn render(f: &mut Frame, app_state: &AppState) {
     let area = f.area();
-    let spinner = get_spinner(app_state.tick);
+    let spinner = spinner::get_spinner(app_state.tick);
+
+    // Detect small viewport to adjust rendering
+    let is_small = area.height < 20 || area.width < 60;
+    
+    // Adjust constraints for small viewports
+    let status_height = if is_small { 2 } else { 3 };
+    let stats_height = if is_small { 4 } else { 6 };
+    let shortcuts_height = if is_small { 2 } else { 3 };
+    let min_progress_height = if is_small { 3 } else { 8 };
 
     // Layout: logo+tagline, status, progress, shortcuts
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(LOGO_WITH_TAGLINE_HEIGHT), // Logo + 2 blank lines + tagline
-            Constraint::Length(3),                        // Status with spinner
-            Constraint::Min(8),                           // Progress bars
-            Constraint::Length(6),                        // Stats (1 for label + 5 for box)
-            Constraint::Length(3),                        // Shortcuts
+            Constraint::Length(status_height),            // Status with spinner
+            Constraint::Min(min_progress_height),         // Progress bars
+            Constraint::Length(stats_height),             // Stats (1 for label + box)
+            Constraint::Length(shortcuts_height),         // Shortcuts
         ])
         .split(area);
 
@@ -83,12 +87,19 @@ pub fn render(f: &mut Frame, app_state: &AppState) {
             status_text,
             Styles::emphasis(),
         )])];
+        // Use simpler borders on small viewports to avoid rendering issues
+        let borders = if is_small { Borders::TOP | Borders::BOTTOM } else { Borders::ALL };
+        let padding = if is_small { 
+            ratatui::widgets::Padding::new(0, 0, 0, 0) 
+        } else { 
+            ratatui::widgets::Padding::uniform(1) 
+        };
         let status = Paragraph::new(status_lines).block(
             Block::default()
-                .borders(Borders::ALL)
+                .borders(borders)
                 .border_style(Styles::border())
                 .title("SCANNING")
-                .padding(ratatui::widgets::Padding::uniform(1)),
+                .padding(padding),
         );
         f.render_widget(status, chunks[1]);
 
@@ -100,7 +111,7 @@ pub fn render(f: &mut Frame, app_state: &AppState) {
             )]))
             .block(
                 Block::default()
-                    .borders(Borders::ALL)
+                    .borders(if is_small { Borders::TOP | Borders::BOTTOM } else { Borders::ALL })
                     .border_style(Styles::border())
                     .title("CATEGORIES"),
             );
@@ -110,18 +121,21 @@ pub fn render(f: &mut Frame, app_state: &AppState) {
         }
 
         // Stats section with label outside
+        let stats_label_height = if is_small { 0 } else { 1 };
         let stats_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // Label
-                Constraint::Min(3),    // Stats box
+                Constraint::Length(stats_label_height), // Label (skip on small viewports)
+                Constraint::Min(if is_small { 2 } else { 3 }), // Stats box
             ])
             .split(chunks[3]);
 
-        // Section label outside the box
-        let label = Paragraph::new(Line::from(vec![Span::styled("PROGRESS", Styles::header())]))
-            .alignment(ratatui::layout::Alignment::Left);
-        f.render_widget(label, stats_chunks[0]);
+        // Section label outside the box (skip on small viewports)
+        if !is_small {
+            let label = Paragraph::new(Line::from(vec![Span::styled("PROGRESS", Styles::header())]))
+                .alignment(ratatui::layout::Alignment::Left);
+            f.render_widget(label, stats_chunks[0]);
+        }
 
         // Stats content in box without title
         let mut size_spans = vec![
@@ -157,19 +171,20 @@ pub fn render(f: &mut Frame, app_state: &AppState) {
         ];
         let stats = Paragraph::new(stats_lines).block(
             Block::default()
-                .borders(Borders::ALL)
+                .borders(if is_small { Borders::TOP | Borders::BOTTOM } else { Borders::ALL })
                 .border_style(Styles::border()),
         );
-        f.render_widget(stats, stats_chunks[1]);
+        f.render_widget(stats, stats_chunks[if is_small { 0 } else { 1 }]);
     } else {
         // Fallback
+        let is_small = area.height < 20 || area.width < 60;
         let empty_msg = Paragraph::new(Line::from(vec![Span::styled(
             "No scan in progress",
             Styles::secondary(),
         )]))
         .block(
             Block::default()
-                .borders(Borders::ALL)
+                .borders(if is_small { Borders::TOP | Borders::BOTTOM } else { Borders::ALL })
                 .border_style(Styles::border()),
         );
         f.render_widget(empty_msg, chunks[2]);
@@ -183,16 +198,22 @@ pub fn render(f: &mut Frame, app_state: &AppState) {
 /// Render cleaning progress (similar to scanning)
 pub fn render_cleaning(f: &mut Frame, app_state: &AppState) {
     let area = f.area();
-    let spinner = get_spinner(app_state.tick);
+    let spinner = spinner::get_spinner(app_state.tick);
+
+    // Detect small viewport to adjust rendering
+    let is_small = area.height < 20 || area.width < 60;
+    let status_height = if is_small { 2 } else { 3 };
+    let stats_height = if is_small { 2 } else { 3 };
+    let shortcuts_height = if is_small { 2 } else { 3 };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(LOGO_WITH_TAGLINE_HEIGHT), // Logo + 2 blank lines + tagline
-            Constraint::Length(3),                        // Status
+            Constraint::Length(status_height),            // Status
             Constraint::Min(1),                           // Progress
-            Constraint::Length(3),                        // Stats
-            Constraint::Length(3),                        // Shortcuts
+            Constraint::Length(stats_height),             // Stats
+            Constraint::Length(shortcuts_height),          // Shortcuts
         ])
         .split(area);
 
@@ -207,7 +228,7 @@ pub fn render_cleaning(f: &mut Frame, app_state: &AppState) {
     )]))
     .block(
         Block::default()
-            .borders(Borders::ALL)
+            .borders(if is_small { Borders::TOP | Borders::BOTTOM } else { Borders::ALL })
             .border_style(Styles::border())
             .title("CLEANING"),
     );
@@ -243,22 +264,22 @@ pub fn render_cleaning(f: &mut Frame, app_state: &AppState) {
         );
 
         // Display current file being deleted
-        let current_file_text = if let Some(ref current_path) = progress.current_path {
-            // Truncate path if too long
-            let path_str = current_path.display().to_string();
-            let max_len = (progress_chunks[1].width as usize).saturating_sub(4); // Account for padding
-            let display_path = if path_str.len() > max_len {
-                format!(
-                    "...{}",
-                    &path_str[path_str.len().saturating_sub(max_len.saturating_sub(3))..]
-                )
+            let current_file_text = if let Some(ref current_path) = progress.current_path {
+                // Truncate path if too long
+                let path_str = current_path.display().to_string();
+                let max_len = (progress_chunks[1].width as usize).saturating_sub(4); // Account for padding
+                let display_path = if path_str.len() > max_len {
+                    format!(
+                        "...{}",
+                        &path_str[path_str.len().saturating_sub(max_len.saturating_sub(3))..]
+                    )
+                } else {
+                    path_str
+                };
+                format!("  Deleting: {}", display_path)
             } else {
-                path_str
+                format!("{}  Preparing...", spinner)
             };
-            format!("  Deleting: {}", display_path)
-        } else {
-            "  Preparing...".to_string()
-        };
 
         let current_file_paragraph = Paragraph::new(Line::from(vec![Span::styled(
             current_file_text,
@@ -266,7 +287,7 @@ pub fn render_cleaning(f: &mut Frame, app_state: &AppState) {
         )]))
         .block(
             Block::default()
-                .borders(Borders::ALL)
+                .borders(if is_small { Borders::TOP | Borders::BOTTOM } else { Borders::ALL })
                 .border_style(Styles::border())
                 .title("CURRENT FILE"),
         );
@@ -279,7 +300,7 @@ pub fn render_cleaning(f: &mut Frame, app_state: &AppState) {
         );
         let status_paragraph = Paragraph::new(status_text).block(
             Block::default()
-                .borders(Borders::ALL)
+                .borders(if is_small { Borders::TOP | Borders::BOTTOM } else { Borders::ALL })
                 .border_style(Styles::border())
                 .title("STATUS"),
         );

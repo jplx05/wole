@@ -119,14 +119,25 @@ pub fn uninstall(
             eprintln!("Continuing with PATH cleanup and optional directory removal...");
         }
     } else {
+        // Create spinner for uninstall operation
+        let spinner = if output_mode != OutputMode::Quiet {
+            Some(crate::progress::create_spinner("Uninstalling wole..."))
+        } else {
+            None
+        };
+
         if output_mode != OutputMode::Quiet {
-            println!("Uninstalling wole...");
             println!("  Executable: {}", exe_path.display());
         }
 
         // Remove executable
         fs::remove_file(&exe_path)
             .with_context(|| format!("Failed to remove executable: {}", exe_path.display()))?;
+
+        // Clear spinner
+        if let Some(sp) = spinner {
+            crate::progress::finish_and_clear(&sp);
+        }
 
         if output_mode != OutputMode::Quiet {
             println!("{} Removed executable", Theme::success("OK"));

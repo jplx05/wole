@@ -1,5 +1,6 @@
 //! Restore screen - restore files from last deletion
 
+use crate::spinner;
 use crate::tui::{
     state::AppState,
     theme::Styles,
@@ -158,22 +159,25 @@ fn render_content(f: &mut Frame, area: Rect, app_state: &AppState, _is_small: bo
                 ])
                 .split(area);
 
-            // Title
+            // Title with spinner
+            let spinner_char = spinner::get_spinner(app_state.tick);
             let title_text = if restore_all_bin {
-                "Restoring all Recycle Bin contents..."
+                format!("{}  Restoring all Recycle Bin contents...", spinner_char)
             } else {
-                "Restoring files from last deletion session..."
+                format!("{}  Restoring files from last deletion session...", spinner_char)
             };
             let title_block = if restore_all_bin { "Restore All" } else { "Restore" };
-            let title = Paragraph::new(title_text)
-                .style(Styles::header())
-                .alignment(Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Styles::border())
-                        .title(title_block),
-                );
+            let title = Paragraph::new(Line::from(vec![Span::styled(
+                title_text,
+                Styles::emphasis(),
+            )]))
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Styles::border())
+                    .title(title_block),
+            );
             f.render_widget(title, chunks[0]);
 
             // Progress bar
@@ -198,6 +202,7 @@ fn render_content(f: &mut Frame, area: Rect, app_state: &AppState, _is_small: bo
             );
 
             // Display current file being restored
+            let spinner_char = spinner::get_spinner(app_state.tick);
             let current_file_text = if let Some(ref current_path) = prog.current_path {
                 // Truncate path if too long
                 let path_str = current_path.display().to_string();
@@ -212,7 +217,7 @@ fn render_content(f: &mut Frame, area: Rect, app_state: &AppState, _is_small: bo
                 };
                 format!("  Restoring: {}", display_path)
             } else {
-                "  Preparing...".to_string()
+                format!("{}  Preparing...", spinner_char)
             };
 
             let current_file_paragraph = Paragraph::new(Line::from(vec![Span::styled(
@@ -240,22 +245,25 @@ fn render_content(f: &mut Frame, area: Rect, app_state: &AppState, _is_small: bo
             );
             f.render_widget(status_paragraph, chunks[3]);
         } else {
-            // Show "Preparing..." message
+            // Show "Preparing..." message with spinner
+            let spinner_char = spinner::get_spinner(app_state.tick);
             let message_text = if restore_all_bin {
-                "Preparing to restore all Recycle Bin contents..."
+                format!("{}  Preparing to restore all Recycle Bin contents...", spinner_char)
             } else {
-                "Preparing to restore files from last deletion..."
+                format!("{}  Preparing to restore files from last deletion...", spinner_char)
             };
             let message_block = if restore_all_bin { "Restore All" } else { "Restore" };
-            let message = Paragraph::new(message_text)
-                .style(Styles::primary())
-                .alignment(Alignment::Center)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Styles::border())
-                        .title(message_block),
-                );
+            let message = Paragraph::new(Line::from(vec![Span::styled(
+                message_text,
+                Styles::emphasis(),
+            )]))
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Styles::border())
+                    .title(message_block),
+            );
             f.render_widget(message, area);
         }
     }
