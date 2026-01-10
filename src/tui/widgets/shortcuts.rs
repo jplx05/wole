@@ -157,6 +157,10 @@ pub fn get_shortcuts(
             ("S", "Sort"),
             ("Q/Esc", "Quit"),
         ],
+        crate::tui::state::Screen::Status { .. } => vec![
+            ("Esc/Q", "Back"),
+            ("R", "Refresh"),
+        ],
         crate::tui::state::Screen::Optimize { .. } => {
             if app_state
                 .and_then(|s| {

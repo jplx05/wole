@@ -49,6 +49,9 @@ pub fn handle_event(
         crate::tui::state::Screen::Optimize { .. } => {
             handle_optimize_event(app_state, key, modifiers)
         }
+        crate::tui::state::Screen::Status { .. } => {
+            handle_status_event(app_state, key, modifiers)
+        }
     }
 }
 
@@ -78,6 +81,9 @@ pub fn handle_mouse_event(app_state: &mut AppState, mouse: MouseEvent) -> EventR
             crate::tui::state::Screen::Optimize { .. } => {
                 handle_optimize_event(app_state, KeyCode::Down, KeyModifiers::empty())
             }
+            crate::tui::state::Screen::Status { .. } => {
+                EventResult::Continue // Status screen doesn't need scrolling
+            }
             _ => EventResult::Continue,
         },
         MouseEventKind::ScrollUp => match app_state.screen {
@@ -101,6 +107,9 @@ pub fn handle_mouse_event(app_state: &mut AppState, mouse: MouseEvent) -> EventR
             }
             crate::tui::state::Screen::Optimize { .. } => {
                 handle_optimize_event(app_state, KeyCode::Up, KeyModifiers::empty())
+            }
+            crate::tui::state::Screen::Status { .. } => {
+                EventResult::Continue // Status screen doesn't need scrolling
             }
             _ => EventResult::Continue,
         },
@@ -297,8 +306,8 @@ fn handle_dashboard_event(
         }
         KeyCode::Down => {
             if app_state.focus_actions {
-                // Navigate in actions list (6 actions: Scan, Clean, Analyze, Restore, Config, Optimize)
-                if app_state.action_cursor < 5 {
+                // Navigate in actions list (7 actions: Scan, Clean, Analyze, Restore, Config, Optimize, Status)
+                if app_state.action_cursor < 6 {
                     app_state.action_cursor += 1;
                 }
             } else {
@@ -444,6 +453,26 @@ fn handle_dashboard_event(
                         running: false,
                         message: None,
                     };
+                }
+                6 => {
+                    // Status action - show status screen
+                    use sysinfo::System;
+                    use crate::status::gather_status;
+                    
+                    let mut system = System::new();
+                    system.refresh_all();
+                    match gather_status(&mut system) {
+                        Ok(status) => {
+                            app_state.screen = crate::tui::state::Screen::Status {
+                                status,
+                                last_refresh: std::time::Instant::now(),
+                            };
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to gather system status: {}", e);
+                            // Stay on dashboard
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -2385,6 +2414,43 @@ fn handle_optimize_event(
                         results.clear();
                         *cursor = 0;
                         *message = None;
+                    }
+                }
+                EventResult::Continue
+            }
+            _ => EventResult::Continue,
+        }
+    } else {
+        EventResult::Continue
+    }
+}
+
+fn handle_status_event(
+    app_state: &mut AppState,
+    key: KeyCode,
+    _modifiers: KeyModifiers,
+) -> EventResult {
+    if let crate::tui::state::Screen::Status { ref mut status, ref mut last_refresh } = app_state.screen {
+        match key {
+            KeyCode::Char('q') | KeyCode::Esc | KeyCode::Char('b') => {
+                // Go back to dashboard
+                app_state.screen = crate::tui::state::Screen::Dashboard;
+                EventResult::Continue
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                // Refresh status
+                use sysinfo::System;
+                use crate::status::gather_status;
+                
+                let mut system = System::new();
+                system.refresh_all();
+                match gather_status(&mut system) {
+                    Ok(new_status) => {
+                        *status = new_status;
+                        *last_refresh = std::time::Instant::now();
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to refresh system status: {}", e);
                     }
                 }
                 EventResult::Continue

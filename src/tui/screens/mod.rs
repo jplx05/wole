@@ -10,6 +10,7 @@ pub mod restore;
 pub mod restore_selection;
 pub mod results;
 pub mod scanning;
+pub mod status;
 pub mod success;
 
 use crate::tui::state::AppState;
@@ -30,5 +31,6 @@ pub fn render(f: &mut Frame, app_state: &mut AppState) {
         crate::tui::state::Screen::Restore { .. } => restore::render(f, app_state),
         crate::tui::state::Screen::DiskInsights { .. } => disk_insights::render(f, app_state),
         crate::tui::state::Screen::Optimize { .. } => optimize::render(f, app_state),
+        crate::tui::state::Screen::Status { .. } => status::render(f, app_state),
     }
 }

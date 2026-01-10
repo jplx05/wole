@@ -19,6 +19,7 @@ pub mod scan_events;
 pub mod scanner;
 pub mod size;
 pub mod spinner;
+pub mod status;
 pub mod theme;
 pub mod tui;
 pub mod uninstall;

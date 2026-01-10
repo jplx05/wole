@@ -38,6 +38,11 @@ globset = "0.4"            # Fast compiled glob patterns
 winreg = "0.52"            # Windows registry access for installed applications
 rusqlite = { version = "0.31", features = ["bundled"] }  # For SQLite VACUUM operations
 ureq = { version = "2.9", features = ["native-tls", "json"] }  # HTTP client for update checks
+sysinfo = "0.32"  # Cross-platform system info (CPU, memory, disk, battery, processes)
+battery = { version = "0.7", optional = true }  # Battery information (optional)
+
+[features]
+default = ["battery"]
 
 [dev-dependencies]
 tempfile = "3.10"

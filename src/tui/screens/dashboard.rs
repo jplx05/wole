@@ -60,6 +60,7 @@ fn render_actions(f: &mut Frame, area: Rect, app_state: &AppState) {
         ("Restore", "Restore files from deletion or Recycle Bin"),
         ("Config", "View or modify settings"),
         ("Optimize", "Optimize Windows system performance"),
+        ("Status", "Real-time system health dashboard"),
     ];
 
     let items: Vec<ListItem> = actions

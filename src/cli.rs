@@ -41,6 +41,7 @@ use crate::output::{self, OutputMode};
 use crate::restore;
 use crate::scanner;
 use crate::size;
+use crate::status;
 use crate::theme::Theme;
 use crate::uninstall;
 
@@ -460,6 +461,18 @@ pub enum Commands {
         #[arg(short = 'y', long = "yes")]
         yes: bool,
     },
+
+    /// Show real-time system status dashboard
+    #[command(visible_alias = "st")]
+    Status {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+        
+        /// Continuous refresh mode (updates every second)
+        #[arg(short = 'w', long)]
+        watch: bool,
+    },
 }
 
 impl Cli {
@@ -536,6 +549,17 @@ impl Cli {
             Theme::muted("→")
         );
         println!();
+        println!(
+            "  {}  {}  {}",
+            Theme::command("status"),
+            Theme::muted("or"),
+            Theme::command("st"),
+        );
+        println!(
+            "     {} Show real-time system status dashboard",
+            Theme::muted("→")
+        );
+        println!();
         println!("{}", Theme::divider(60));
         println!();
         println!("{}", Theme::primary("Quick Examples:"));
@@ -568,6 +592,10 @@ impl Cli {
         println!(
             "  {} Run all system optimizations",
             Theme::command("wole optimize --all")
+        );
+        println!(
+            "  {} Show system status",
+            Theme::command("wole status")
         );
         println!();
         println!(
@@ -1455,6 +1483,45 @@ impl Cli {
 
                 optimize::print_summary(&results, output_mode);
                 Ok(())
+            }
+            Commands::Status { json, watch: _ } => {
+                if json {
+                    // JSON output mode - use text output
+                    use sysinfo::System;
+                    
+                    let mut system = System::new();
+                    system.refresh_all();
+                    
+                    match status::gather_status(&mut system) {
+                        Ok(status) => {
+                            let json_output = serde_json::to_string_pretty(&status)?;
+                            println!("{}", json_output);
+                            Ok(())
+                        }
+                        Err(e) => Err(anyhow::anyhow!("Failed to gather system status: {}", e)),
+                    }
+                } else {
+                    // Launch interactive TUI for real-time status dashboard
+                    // Ignore watch flag - TUI always auto-refreshes
+                    use sysinfo::System;
+                    use crate::status::gather_status;
+                    
+                    let mut system = System::new();
+                    system.refresh_all();
+                    
+                    match gather_status(&mut system) {
+                        Ok(status) => {
+                            let mut app_state = crate::tui::state::AppState::new();
+                            app_state.screen = crate::tui::state::Screen::Status {
+                                status,
+                                last_refresh: std::time::Instant::now(),
+                            };
+                            crate::tui::run(Some(app_state))?;
+                            Ok(())
+                        }
+                        Err(e) => Err(anyhow::anyhow!("Failed to gather system status: {}", e)),
+                    }
+                }
             }
             }
         }

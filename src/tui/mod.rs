@@ -47,6 +47,21 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
         // Increment tick for animations
         app_state.tick = app_state.tick.wrapping_add(1);
 
+        // Auto-refresh Status screen every 2 seconds
+        if let crate::tui::state::Screen::Status { ref mut status, ref mut last_refresh } = app_state.screen {
+            if last_refresh.elapsed().as_secs() >= 2 {
+                use sysinfo::System;
+                use crate::status::gather_status;
+                
+                // Create system and gather status (optimized refresh inside)
+                let mut system = System::new();
+                if let Ok(new_status) = gather_status(&mut system) {
+                    *status = new_status;
+                    *last_refresh = std::time::Instant::now();
+                }
+            }
+        }
+
         terminal.draw(|f| render(f, &mut app_state))?;
 
         // Handle pending restore

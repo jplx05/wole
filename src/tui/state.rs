@@ -96,6 +96,10 @@ pub enum Screen {
         running: bool,
         message: Option<String>,
     },
+    Status {
+        status: crate::status::SystemStatus,
+        last_refresh: std::time::Instant,
+    },
 }
 
 /// Result of a restore operation
