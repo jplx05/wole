@@ -1713,8 +1713,9 @@ impl AppState {
     }
 
     /// Toggle expansion for a category in the confirm screen.
-    /// This updates the corresponding category_group's expansion state.
+    /// This updates the corresponding category_group's expansion state and the cache.
     pub fn toggle_confirm_category(&mut self, category_name: &str) {
+        // Update the original category group
         if let Some(group) = self
             .category_groups
             .iter_mut()
@@ -1722,11 +1723,21 @@ impl AppState {
         {
             group.expanded = !group.expanded;
         }
+        
+        // Update the cached groups to preserve ordering
+        if let Some(cached_group) = self
+            .confirm_groups_cache
+            .iter_mut()
+            .find(|g| g.name == category_name)
+        {
+            cached_group.expanded = !cached_group.expanded;
+        }
     }
 
     /// Toggle expansion for a folder in the confirm screen.
-    /// This updates the corresponding folder_group's expansion state.
+    /// This updates the corresponding folder_group's expansion state and the cache.
     pub fn toggle_confirm_folder(&mut self, category_name: &str, folder_name: &str) {
+        // Update the original category group
         if let Some(group) = self
             .category_groups
             .iter_mut()
@@ -1738,6 +1749,21 @@ impl AppState {
                 .find(|f| f.folder_name == folder_name)
             {
                 folder.expanded = !folder.expanded;
+            }
+        }
+        
+        // Update the cached groups to preserve ordering
+        if let Some(cached_group) = self
+            .confirm_groups_cache
+            .iter_mut()
+            .find(|g| g.name == category_name)
+        {
+            if let Some(cached_folder) = cached_group
+                .folder_groups
+                .iter_mut()
+                .find(|f| f.folder_name == folder_name)
+            {
+                cached_folder.expanded = !cached_folder.expanded;
             }
         }
     }

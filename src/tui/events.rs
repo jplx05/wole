@@ -446,7 +446,9 @@ fn handle_config_event(
     // 4 animations (bool)
     // 5 refresh_rate_ms (u64)
     // 6 show_storage_info (bool)
-    let fields_len = 7usize;
+    // 7 scan_depth_user (u8)
+    // 8 scan_depth_entire_disk (u8)
+    let fields_len = 9usize;
 
     // Editing mode has its own key handling.
     if let ConfigEditorMode::Editing { ref mut buffer } = app_state.config_editor.mode {
@@ -504,6 +506,20 @@ fn handle_config_event(
                         }
                         Err(_) => err = Some("Invalid number for refresh rate (ms).".to_string()),
                     },
+                    7 => match raw.parse::<u8>() {
+                        Ok(v) => {
+                            app_state.config.ui.scan_depth_user = v;
+                            changed = true;
+                        }
+                        Err(_) => err = Some("Invalid number for scan depth (user). Must be 0-255.".to_string()),
+                    },
+                    8 => match raw.parse::<u8>() {
+                        Ok(v) => {
+                            app_state.config.ui.scan_depth_entire_disk = v;
+                            changed = true;
+                        }
+                        Err(_) => err = Some("Invalid number for scan depth (disk). Must be 0-255.".to_string()),
+                    },
                     _ => {}
                 }
 
@@ -528,7 +544,7 @@ fn handle_config_event(
             KeyCode::Char(c) => {
                 let selected = app_state.config_editor.selected;
                 // Numeric fields accept digits only.
-                let is_numeric = matches!(selected, 0 | 1 | 2 | 5);
+                let is_numeric = matches!(selected, 0 | 1 | 2 | 5 | 7 | 8);
                 if is_numeric {
                     if c.is_ascii_digit() {
                         buffer.push(c);
@@ -657,6 +673,20 @@ fn handle_config_event(
                     };
                     app_state.config_editor.message =
                         Some("Edit value, then Enter to save (Esc cancels).".to_string());
+                }
+                7 => {
+                    app_state.config_editor.mode = ConfigEditorMode::Editing {
+                        buffer: app_state.config.ui.scan_depth_user.to_string(),
+                    };
+                    app_state.config_editor.message =
+                        Some("Edit value (0-255), then Enter to save (Esc cancels).".to_string());
+                }
+                8 => {
+                    app_state.config_editor.mode = ConfigEditorMode::Editing {
+                        buffer: app_state.config.ui.scan_depth_entire_disk.to_string(),
+                    };
+                    app_state.config_editor.message =
+                        Some("Edit value (0-255), then Enter to save (Esc cancels).".to_string());
                 }
                 _ => {}
             }
@@ -1358,7 +1388,7 @@ fn handle_preview_event(
 fn handle_confirm_event(
     app_state: &mut AppState,
     key: KeyCode,
-    _modifiers: KeyModifiers,
+    modifiers: KeyModifiers,
 ) -> EventResult {
     let rows = app_state.confirm_rows();
     let max_row = rows.len().saturating_sub(1);
@@ -1448,6 +1478,114 @@ fn handle_confirm_event(
             move_cursor(app_state, &rows, 1, visible_height);
             EventResult::Continue
         }
+        KeyCode::Right => {
+            if !rows.is_empty() && app_state.cursor < rows.len() {
+                let row = rows[app_state.cursor];
+                match row {
+                    crate::tui::state::ConfirmRow::CategoryHeader { cat_idx } => {
+                        let confirm_groups = app_state.confirm_category_groups();
+                        if let Some(group) = confirm_groups.get(cat_idx) {
+                            if !group.expanded {
+                                app_state.toggle_confirm_category(&group.name);
+                            } else {
+                                move_cursor(app_state, &rows, 1, visible_height);
+                            }
+                        }
+                    }
+                    crate::tui::state::ConfirmRow::FolderHeader {
+                        cat_idx,
+                        folder_idx,
+                    } => {
+                        let confirm_groups = app_state.confirm_category_groups();
+                        if let Some(group) = confirm_groups.get(cat_idx) {
+                            if let Some(folder) = group.folder_groups.get(folder_idx) {
+                                if !folder.expanded {
+                                    app_state.toggle_confirm_folder(&group.name, &folder.folder_name);
+                                } else {
+                                    move_cursor(app_state, &rows, 1, visible_height);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            EventResult::Continue
+        }
+        KeyCode::Left => {
+            if !rows.is_empty() && app_state.cursor < rows.len() {
+                let row = rows[app_state.cursor];
+                match row {
+                    crate::tui::state::ConfirmRow::CategoryHeader { cat_idx } => {
+                        let confirm_groups = app_state.confirm_category_groups();
+                        if let Some(group) = confirm_groups.get(cat_idx) {
+                            if group.expanded {
+                                app_state.toggle_confirm_category(&group.name);
+                            }
+                        }
+                    }
+                    crate::tui::state::ConfirmRow::FolderHeader {
+                        cat_idx,
+                        folder_idx,
+                    } => {
+                        let confirm_groups = app_state.confirm_category_groups();
+                        let mut collapsed_now = false;
+                        if let Some(group) = confirm_groups.get(cat_idx) {
+                            if let Some(folder) = group.folder_groups.get(folder_idx) {
+                                if folder.expanded {
+                                    app_state.toggle_confirm_folder(&group.name, &folder.folder_name);
+                                    collapsed_now = true;
+                                }
+                            }
+                        }
+
+                        // If we didn't just collapse it (was already collapsed), jump to parent category
+                        if !collapsed_now {
+                            // Find category header for this group
+                            // Search backwards for CategoryHeader with same cat_idx
+                            for i in (0..app_state.cursor).rev() {
+                                if let Some(r) = rows.get(i) {
+                                    if let crate::tui::state::ConfirmRow::CategoryHeader {
+                                        cat_idx: c_idx,
+                                    } = *r
+                                    {
+                                        if c_idx == cat_idx {
+                                            app_state.cursor = i;
+                                            // Ensure scroll
+                                            if app_state.cursor < app_state.scroll_offset {
+                                                app_state.scroll_offset = app_state.cursor;
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    crate::tui::state::ConfirmRow::Item { item_idx: _ } => {
+                        // Find parent header (Folder or Category)
+                        // Search backwards for the first header
+                        for i in (0..app_state.cursor).rev() {
+                            if let Some(r) = rows.get(i) {
+                                match *r {
+                                    crate::tui::state::ConfirmRow::FolderHeader { .. }
+                                    | crate::tui::state::ConfirmRow::CategoryHeader { .. } => {
+                                        app_state.cursor = i;
+                                        if app_state.cursor < app_state.scroll_offset {
+                                            app_state.scroll_offset = app_state.cursor;
+                                        }
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    crate::tui::state::ConfirmRow::Spacer => {}
+                }
+            }
+            EventResult::Continue
+        }
         KeyCode::Char(' ') => {
             // Toggle selection
             let Some(row) = rows.get(app_state.cursor) else {
@@ -1495,7 +1633,133 @@ fn handle_confirm_event(
             EventResult::Continue
         }
         KeyCode::Enter => {
-            // Toggle expansion for category or folder headers
+            // Check for Ctrl+Enter to expand/collapse sibling groups
+            if modifiers.contains(KeyModifiers::CONTROL) {
+                let Some(row) = rows.get(app_state.cursor) else {
+                    return EventResult::Continue;
+                };
+
+                // Expand/collapse sibling groups based on current row
+                match *row {
+                    crate::tui::state::ConfirmRow::CategoryHeader { cat_idx: _ } => {
+                        // Expand/collapse all sibling categories
+                        // Determine the current state (if any sibling is expanded, collapse all; otherwise expand all)
+                        let any_expanded = app_state.category_groups.iter().any(|g| g.expanded);
+                        for group in &mut app_state.category_groups {
+                            group.expanded = !any_expanded;
+                        }
+                        // Update cache in place to preserve ordering
+                        for cached_group in &mut app_state.confirm_groups_cache {
+                            cached_group.expanded = !any_expanded;
+                        }
+                    }
+                    crate::tui::state::ConfirmRow::FolderHeader {
+                        cat_idx,
+                        folder_idx: _,
+                    } => {
+                        // Expand/collapse all sibling folders in the same category
+                        let confirm_groups = app_state.confirm_category_groups();
+                        if let Some(group) = confirm_groups.get(cat_idx) {
+                            // Find the category group and expand/collapse all sibling folders
+                            if let Some(category_group) = app_state
+                                .category_groups
+                                .iter_mut()
+                                .find(|g| g.name == group.name)
+                            {
+                                // Determine the current state (if any sibling folder is expanded, collapse all; otherwise expand all)
+                                let any_expanded = category_group.folder_groups.iter().any(|f| f.expanded);
+                                for folder in &mut category_group.folder_groups {
+                                    folder.expanded = !any_expanded;
+                                }
+                                // Update cache in place to preserve ordering
+                                if let Some(cached_group) = app_state
+                                    .confirm_groups_cache
+                                    .iter_mut()
+                                    .find(|g| g.name == group.name)
+                                {
+                                    for cached_folder in &mut cached_group.folder_groups {
+                                        cached_folder.expanded = !any_expanded;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    crate::tui::state::ConfirmRow::Item { item_idx: _ } => {
+                        // Find the parent folder or category and expand/collapse siblings
+                        // Search backwards to find the folder header or category header
+                        let mut category_name = None;
+                        let mut folder_name = None;
+
+                        for i in (0..=app_state.cursor).rev() {
+                            if let Some(r) = rows.get(i) {
+                                match *r {
+                                    crate::tui::state::ConfirmRow::FolderHeader {
+                                        cat_idx,
+                                        folder_idx,
+                                    } => {
+                                        let confirm_groups = app_state.confirm_category_groups();
+                                        if let Some(group) = confirm_groups.get(cat_idx) {
+                                            if let Some(folder) = group.folder_groups.get(folder_idx) {
+                                                category_name = Some(group.name.clone());
+                                                folder_name = Some(folder.folder_name.clone());
+                                            }
+                                        }
+                                        break;
+                                    }
+                                    crate::tui::state::ConfirmRow::CategoryHeader { cat_idx } => {
+                                        let confirm_groups = app_state.confirm_category_groups();
+                                        if let Some(group) = confirm_groups.get(cat_idx) {
+                                            category_name = Some(group.name.clone());
+                                        }
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+
+                        if let Some(cat_name) = category_name {
+                            if folder_name.is_some() {
+                                // Item is under a folder - expand/collapse all sibling folders
+                                if let Some(group) = app_state
+                                    .category_groups
+                                    .iter_mut()
+                                    .find(|g| g.name == cat_name)
+                                {
+                                    let any_expanded = group.folder_groups.iter().any(|f| f.expanded);
+                                    for folder in &mut group.folder_groups {
+                                        folder.expanded = !any_expanded;
+                                    }
+                                    // Update cache in place to preserve ordering
+                                    if let Some(cached_group) = app_state
+                                        .confirm_groups_cache
+                                        .iter_mut()
+                                        .find(|g| g.name == cat_name)
+                                    {
+                                        for cached_folder in &mut cached_group.folder_groups {
+                                            cached_folder.expanded = !any_expanded;
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Item is directly under category - expand/collapse all sibling categories
+                                let any_expanded = app_state.category_groups.iter().any(|g| g.expanded);
+                                for group in &mut app_state.category_groups {
+                                    group.expanded = !any_expanded;
+                                }
+                                // Update cache in place to preserve ordering
+                                for cached_group in &mut app_state.confirm_groups_cache {
+                                    cached_group.expanded = !any_expanded;
+                                }
+                            }
+                        }
+                    }
+                    crate::tui::state::ConfirmRow::Spacer => {}
+                }
+                return EventResult::Continue;
+            }
+
+            // Regular Enter (without Ctrl) - toggle expansion for category or folder headers
             let Some(row) = rows.get(app_state.cursor) else {
                 return EventResult::Continue;
             };

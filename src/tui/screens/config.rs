@@ -177,6 +177,32 @@ fn render_body(f: &mut Frame, area: Rect, app_state: &AppState) {
         Span::styled("   (Space/Enter toggles)", Styles::secondary()),
     ]));
 
+    // 7 scan_depth_user
+    field_lines.push(Line::from(vec![
+        Span::styled("  Scan depth (user):  ", Styles::secondary()),
+        Span::styled(
+            if editing && selected == 7 {
+                edit_buffer.unwrap_or("").to_string()
+            } else {
+                format!("{}", config.ui.scan_depth_user)
+            },
+            field_style(7),
+        ),
+    ]));
+
+    // 8 scan_depth_entire_disk
+    field_lines.push(Line::from(vec![
+        Span::styled("  Scan depth (disk):  ", Styles::secondary()),
+        Span::styled(
+            if editing && selected == 8 {
+                edit_buffer.unwrap_or("").to_string()
+            } else {
+                format!("{}", config.ui.scan_depth_entire_disk)
+            },
+            field_style(8),
+        ),
+    ]));
+
     let text = Text::from(vec![
         Line::from(vec![Span::styled("Config file:", Styles::header())]),
         Line::from(vec![Span::styled(
