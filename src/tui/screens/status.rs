@@ -15,6 +15,8 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
+#[cfg(windows)]
+use chrono;
 
 pub fn render(f: &mut Frame, app_state: &AppState) {
     let area = f.area();
@@ -149,55 +151,347 @@ fn render_status_header_with_indicator(
 }
 
 fn render_status_dashboard(f: &mut Frame, area: Rect, status: &SystemStatus) {
-    // Main layout: top section (columns) and bottom section (network/processes)
+    // LAYOUT HIERARCHY:
+    // 1. Primary Metrics: CPU, Memory, Disk (most important, side by side)
+    // 2. Secondary Metrics: Network, Power (below primary)
+    // 3. Detailed Analysis: Processes, I/O breakdown (bottom)
+    
+    let available_height = area.height as i32;
+    let available_width = area.width as i32;
+    
+    // Minimum width check - if too narrow, show warning
+    if available_width < 80 {
+        let msg = Paragraph::new("Terminal too narrow. Please resize to at least 80 columns")
+            .style(Styles::warning())
+            .alignment(Alignment::Center);
+        f.render_widget(msg, area);
+        return;
+    }
+    
+    // Fixed heights for sections - ensure they always render
+    // These heights are adaptive based on available space
+    // CPU section needs enough height for all cores (12 cores = 6 rows in 2-column layout)
+    // Disk section now includes breakdown (up to 5 categories), so needs more height
+    // So we need: CPU (1 total + 1 info + 6 cores = 8) vs Disk (4 basic + 1 separator + 5 breakdown = 10)
+    // Use the maximum: 10 minimum for primary row
+    let min_primary_height = 10u16; // CPU/Memory/Disk - enough for all 12 cores + disk breakdown
+    // Secondary row now has 3 columns: Network, Power, System Diagnostics
+    // Need enough height for the tallest section (Power or System Diagnostics)
+    let min_secondary_height = 8u16; // Network + Power + System Diagnostics
+    
+    // Calculate Top Disk I/O section height (must be before processes_height calculation)
+    #[cfg(windows)]
+    let top_io_height = if !status.top_io_processes.is_empty() {
+        (status.top_io_processes.len().min(5) + 2) as u16
+    } else {
+        0u16
+    };
+    #[cfg(not(windows))]
+    let top_io_height = 0u16;
+    
+    let io_spacing = if top_io_height > 0 { 1u16 } else { 0u16 };
+    
+    // Calculate reserved space for fixed sections
+    let reserved_for_others = min_primary_height as i32 + 1 + min_secondary_height as i32 + 1 + 
+                              top_io_height as i32 + io_spacing as i32;
+    
+    // Ensure we have minimum space - if not, reduce processes but keep essential sections
+    if available_height < reserved_for_others + 8 {
+        // Terminal too small - show minimal layout
+        let msg = Paragraph::new("Terminal too small. Please resize to at least 80x30")
+            .style(Styles::warning())
+            .alignment(Alignment::Center);
+        f.render_widget(msg, area);
+        return;
+    }
+    
+    // Use actual calculated heights (may be larger if space allows)
+    let primary_metrics_height = min_primary_height;
+    let primary_spacing = 1u16;
+    let secondary_metrics_height = min_secondary_height;
+    let secondary_spacing = 1u16;
+    
+    // Maximize processes section - use remaining space after other sections
+    let processes_height = (available_height - reserved_for_others).max(8) as u16; // At least 8 lines
+    
     let main_sections = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(20), // Top section (CPU/Memory/Disk/Power) - increased for process count
-            Constraint::Length(1),  // Spacing
-            Constraint::Length(7),  // Network section (ensure it's always visible)
-            Constraint::Length(1),  // Spacing
-            Constraint::Min(5),     // Processes section
+            Constraint::Length(primary_metrics_height), // Primary metrics (CPU/Memory/Disk) - FIXED HEIGHT
+            Constraint::Length(primary_spacing), // Spacing
+            Constraint::Length(secondary_metrics_height), // Secondary metrics (Network/Power/System Diagnostics) - FIXED HEIGHT
+            Constraint::Length(secondary_spacing), // Spacing
+            Constraint::Length(top_io_height), // Top Disk I/O (Windows only)
+            Constraint::Length(io_spacing), // Spacing
+            Constraint::Min(processes_height), // Processes section - MAXIMIZED to use remaining space
         ])
         .split(area);
-
-    // Top section: Two column layout
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(main_sections[0]);
-
-    // Left column: CPU and Memory
-    let left_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(11), // CPU (increased for process count)
-            Constraint::Length(1),  // Spacing
-            Constraint::Length(6),  // Memory (reduced since we removed redundant Free/Avail)
-        ])
-        .split(columns[0]);
-
-    render_cpu_section(f, left_chunks[0], status);
-    render_memory_section(f, left_chunks[2], status);
-
-    // Right column: Disk and Power
-    let right_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(8),  // Disk
-            Constraint::Length(1),  // Spacing
-            Constraint::Length(12), // Power (increased to accommodate new fields)
-        ])
-        .split(columns[1]);
-
-    render_disk_section(f, right_chunks[0], status);
-    render_power_section(f, right_chunks[2], status);
-
-    // Network and Processes in bottom sections
-    render_network_section(f, main_sections[2], status);
-    render_processes_section(f, main_sections[4], status);
+    
+    // Layout structure (fixed indices):
+    // [0] primary metrics (CPU/Memory/Disk) - ALWAYS HERE with height > 0
+    // [1] primary spacing
+    // [2] secondary metrics (Network/Power/System Diagnostics) - ALWAYS HERE with height > 0
+    // [3] secondary spacing
+    // [4] top I/O (height 0 if no I/O)
+    // [5] I/O spacing (height 0 if no I/O)
+    // [6] processes - ALWAYS HERE
+    
+    // Primary metrics: CPU, Memory, Disk (side by side) - ALWAYS at index 0
+    if main_sections.len() > 0 && main_sections[0].height > 0 {
+        let primary_area = main_sections[0];
+        
+        // Ensure minimum width per column (at least 20 chars each)
+        let min_col_width = 20u16;
+        let total_min_width = min_col_width * 3 + 2; // 3 columns + 2 spacers
+        
+        if primary_area.width >= total_min_width {
+            // Enough space - use percentage-based layout
+            let primary_cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(34), // CPU
+                    Constraint::Length(1), // Spacing
+                    Constraint::Percentage(33), // Memory
+                    Constraint::Length(1), // Spacing
+                    Constraint::Percentage(33), // Disk
+                ])
+                .split(primary_area);
+            
+            render_cpu_section_compact(f, primary_cols[0], status);
+            render_memory_section_compact(f, primary_cols[2], status);
+            render_disk_section_compact(f, primary_cols[4], status);
+        } else {
+            // Too narrow - stack vertically instead
+            let stacked = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(primary_area.height / 3),
+                    Constraint::Length(1),
+                    Constraint::Length(primary_area.height / 3),
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                ])
+                .split(primary_area);
+            
+            render_cpu_section_compact(f, stacked[0], status);
+            render_memory_section_compact(f, stacked[2], status);
+            render_disk_section_compact(f, stacked[4], status);
+        }
+    }
+    
+    // Secondary metrics: Network, Power, and System Diagnostics (3 columns) - ALWAYS at index 2
+    if main_sections.len() > 2 && main_sections[2].height > 0 {
+        let secondary_area = main_sections[2];
+        
+        // Ensure minimum width per column (at least 25 chars each for 3 columns)
+        let min_col_width = 25u16;
+        let total_min_width = min_col_width * 3 + 2; // 3 columns + 2 spacers
+        
+        if secondary_area.width >= total_min_width {
+            // Enough space - use 3-column layout
+            let secondary_cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(34), // Network
+                    Constraint::Length(1), // Spacing
+                    Constraint::Percentage(33), // Power
+                    Constraint::Length(1), // Spacing
+                    Constraint::Percentage(33), // System Diagnostics
+                ])
+                .split(secondary_area);
+            
+            render_network_section(f, secondary_cols[0], status);
+            render_power_section_compact(f, secondary_cols[2], status);
+            #[cfg(windows)]
+            {
+                if let Some(ref boot_info) = status.boot_info {
+                    render_boot_info_section(f, secondary_cols[4], boot_info);
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                // Non-Windows: leave empty or show placeholder
+            }
+        } else {
+            // Too narrow - stack vertically
+            let stacked = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(secondary_area.height / 3),
+                    Constraint::Length(1),
+                    Constraint::Length(secondary_area.height / 3),
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                ])
+                .split(secondary_area);
+            
+            render_network_section(f, stacked[0], status);
+            render_power_section_compact(f, stacked[2], status);
+            #[cfg(windows)]
+            {
+                if let Some(ref boot_info) = status.boot_info {
+                    render_boot_info_section(f, stacked[4], boot_info);
+                }
+            }
+        }
+    }
+    
+    // Top Disk I/O section (Windows only) - at index 4
+    #[cfg(windows)]
+    {
+        if top_io_height > 0 && main_sections.len() > 4 && main_sections[4].height > 0 {
+            render_top_io_section(f, main_sections[4], status);
+        }
+    }
+    
+    // Processes section - at index 6
+    let process_idx = 6;
+    if main_sections.len() > process_idx && main_sections[process_idx].height > 0 {
+        render_processes_section(f, main_sections[process_idx], status);
+    } else {
+        // Fallback: try to render processes even if layout calculation was wrong
+        // This ensures processes are always visible
+        if main_sections.len() > 4 {
+            render_processes_section(f, main_sections[main_sections.len() - 1], status);
+        }
+    }
 }
 
+
+fn render_cpu_section_compact(f: &mut Frame, area: Rect, status: &SystemStatus) {
+    // Compact CPU section - shows only essential info
+    let cpu_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Styles::border())
+        .title("⚡ CPU");
+
+    let inner = cpu_block.inner(area);
+    f.render_widget(cpu_block, area);
+    
+    // Calculate how many rows we need for cores (2-column layout)
+    // For 12 cores: (12 + 1) / 2 = 6.5 -> 6 rows needed
+    let total_cores = status.cpu.cores.len();
+    let cores_rows = ((total_cores + 1) / 2).max(1);
+    
+    let lines = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Total usage
+            Constraint::Length(1), // Processor info
+            Constraint::Min(cores_rows as u16), // Cores (ensure enough rows for all cores)
+        ])
+        .split(inner);
+
+    // Total CPU usage - prominent
+    let total_bar = create_progress_bar(status.cpu.total_usage / 100.0, 15);
+    let total_text = format!("Total {} {:.1}%", total_bar, status.cpu.total_usage);
+    let total_para = Paragraph::new(total_text).style(Styles::primary());
+    f.render_widget(total_para, lines[0]);
+
+    // Processor info - compact (show CPU name/model)
+    // Calculate available width dynamically based on actual area width
+    let proc_text = if let Some(freq_mhz) = status.cpu.frequency_mhz {
+        // Calculate fixed parts: " · " + frequency (e.g., "2.1 GHz") + " · " + cores (e.g., "12 cores")
+        let freq_str = format!("{:.1} GHz", freq_mhz as f64 / 1000.0);
+        let cores_str = format!("{} cores", status.cpu.cores.len());
+        let fixed_parts_len = 3 + freq_str.len() + 3 + cores_str.len(); // " · " + freq + " · " + cores
+        
+        // Available width for brand: area width minus fixed parts
+        let available_width = lines[1].width.saturating_sub(fixed_parts_len as u16);
+        
+        // Truncate CPU brand only if it exceeds available width
+        let brand = if status.cpu.brand.len() > available_width as usize {
+            let truncate_len = available_width.saturating_sub(1) as usize; // Reserve 1 char for ellipsis
+            format!("{}…", &status.cpu.brand[..truncate_len])
+        } else {
+            status.cpu.brand.clone()
+        };
+        format!("{} · {} · {}", brand, freq_str, cores_str)
+    } else {
+        // Calculate fixed parts: " · " + cores (e.g., "12 cores")
+        let cores_str = format!("{} cores", status.cpu.cores.len());
+        let fixed_parts_len = 3 + cores_str.len(); // " · " + cores
+        
+        // Available width for brand: area width minus fixed parts
+        let available_width = lines[1].width.saturating_sub(fixed_parts_len as u16);
+        
+        // Truncate CPU brand only if it exceeds available width
+        let brand = if status.cpu.brand.len() > available_width as usize {
+            let truncate_len = available_width.saturating_sub(1) as usize; // Reserve 1 char for ellipsis
+            format!("{}…", &status.cpu.brand[..truncate_len])
+        } else {
+            status.cpu.brand.clone()
+        };
+        format!("{} · {}", brand, cores_str)
+    };
+    let proc_para = Paragraph::new(proc_text).style(Styles::secondary());
+    f.render_widget(proc_para, lines[1]);
+
+    // Cores - compact 2-column layout (show ALL cores)
+    let cores_area = lines[2];
+    if cores_area.height >= 2 {
+        let core_cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(cores_area);
+        
+        let total_cores = status.cpu.cores.len();
+        let cores_per_col = (total_cores + 1) / 2; // Split cores evenly between columns (12 cores = 6 per column)
+        let available_rows = cores_area.height as usize;
+        
+        // Show ALL cores - render up to cores_per_col rows (which covers all cores in 2 columns)
+        let rows_to_render = available_rows.min(cores_per_col);
+        
+        for row in 0..rows_to_render {
+            // Left column - cores 0 to cores_per_col-1
+            if let Some(core) = status.cpu.cores.get(row) {
+                let core_bar = create_mini_bar(core.usage / 100.0, 5);
+                let core_text = format!("C{:2} {} {:4.1}%", core.id + 1, core_bar, core.usage);
+                let core_para = Paragraph::new(core_text).style(Styles::secondary());
+                let core_area = Rect {
+                    x: core_cols[0].x,
+                    y: core_cols[0].y + row as u16,
+                    width: core_cols[0].width,
+                    height: 1,
+                };
+                f.render_widget(core_para, core_area);
+            }
+            
+            // Right column - cores cores_per_col to total_cores-1
+            if let Some(core) = status.cpu.cores.get(row + cores_per_col) {
+                let core_bar = create_mini_bar(core.usage / 100.0, 5);
+                let core_text = format!("C{:2} {} {:4.1}%", core.id + 1, core_bar, core.usage);
+                let core_para = Paragraph::new(core_text).style(Styles::secondary());
+                let core_area = Rect {
+                    x: core_cols[1].x,
+                    y: core_cols[1].y + row as u16,
+                    width: core_cols[1].width,
+                    height: 1,
+                };
+                f.render_widget(core_para, core_area);
+            }
+        }
+        
+        // If we couldn't show all cores due to space constraints, show a message
+        if rows_to_render < cores_per_col && cores_area.height > 0 {
+            let cores_shown = rows_to_render * 2;
+            let remaining = total_cores - cores_shown;
+            if remaining > 0 {
+                let msg_text = format!("... {} more cores", remaining);
+                let msg_area = Rect {
+                    x: cores_area.x,
+                    y: cores_area.y + cores_area.height - 1,
+                    width: cores_area.width,
+                    height: 1,
+                };
+                let msg_para = Paragraph::new(msg_text).style(Styles::secondary());
+                f.render_widget(msg_para, msg_area);
+            }
+        }
+    }
+}
+
+#[allow(dead_code)] // Kept for potential future use or debugging
 fn render_cpu_section(f: &mut Frame, area: Rect, status: &SystemStatus) {
     let cpu_block = Block::default()
         .borders(Borders::ALL)
@@ -207,17 +501,26 @@ fn render_cpu_section(f: &mut Frame, area: Rect, status: &SystemStatus) {
     let inner = cpu_block.inner(area);
     f.render_widget(cpu_block, area);
 
+    // On Windows, skip the Load line since load averages aren't meaningful
+    let show_load = !cfg!(windows);
+    
+    let mut constraints = vec![
+        Constraint::Length(1), // Total
+    ];
+    if show_load {
+        constraints.push(Constraint::Length(1)); // Load (only on Unix)
+    }
+    constraints.extend([
+        Constraint::Length(1), // Processor brand
+        Constraint::Length(1), // Frequency/Vendor
+        Constraint::Length(1), // Processes
+        Constraint::Length(1), // Spacing
+        Constraint::Min(1),    // Cores
+    ]);
+    
     let lines = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // Total
-            Constraint::Length(1), // Load
-            Constraint::Length(1), // Processor brand
-            Constraint::Length(1), // Frequency/Vendor
-            Constraint::Length(1), // Processes
-            Constraint::Length(1), // Spacing
-            Constraint::Min(1),    // Cores
-        ])
+        .constraints(constraints)
         .split(inner);
 
     // Total CPU usage
@@ -226,23 +529,28 @@ fn render_cpu_section(f: &mut Frame, area: Rect, status: &SystemStatus) {
     let total_para = Paragraph::new(total_text).style(Styles::primary());
     f.render_widget(total_para, lines[0]);
 
-    // Load averages
-    let load_text = format!(
-        "Load    {:.2} / {:.2} / {:.2} ({} cores)",
-        status.cpu.load_avg_1min,
-        status.cpu.load_avg_5min,
-        status.cpu.load_avg_15min,
-        status.cpu.cores.len()
-    );
-    let load_para = Paragraph::new(load_text).style(Styles::secondary());
-    f.render_widget(load_para, lines[1]);
+    // Load averages (only on Unix systems)
+    let mut line_idx = 1;
+    if show_load {
+        let load_text = format!(
+            "Load    {:.2} / {:.2} / {:.2} ({} cores)",
+            status.cpu.load_avg_1min,
+            status.cpu.load_avg_5min,
+            status.cpu.load_avg_15min,
+            status.cpu.cores.len()
+        );
+        let load_para = Paragraph::new(load_text).style(Styles::secondary());
+        f.render_widget(load_para, lines[line_idx]);
+        line_idx += 1;
+    }
 
-    // Processor brand (first line)
+    // Processor brand
     let brand_text = format!("Proc    {}", status.cpu.brand);
     let brand_para = Paragraph::new(brand_text).style(Styles::secondary());
-    f.render_widget(brand_para, lines[2]);
+    f.render_widget(brand_para, lines[line_idx]);
+    line_idx += 1;
 
-    // Frequency and vendor info (second line)
+    // Frequency and vendor info
     let freq_text = if let Some(freq_mhz) = status.cpu.frequency_mhz {
         let freq_ghz = freq_mhz as f64 / 1000.0;
         format!("Freq    {:.2} GHz · {}", freq_ghz, status.cpu.vendor_id)
@@ -250,33 +558,122 @@ fn render_cpu_section(f: &mut Frame, area: Rect, status: &SystemStatus) {
         format!("Vendor  {}", status.cpu.vendor_id)
     };
     let freq_para = Paragraph::new(freq_text).style(Styles::secondary());
-    f.render_widget(freq_para, lines[3]);
+    f.render_widget(freq_para, lines[line_idx]);
+    line_idx += 1;
 
     // Process count
     let proc_text = format!("Procs   {}", status.cpu.process_count);
     let proc_para = Paragraph::new(proc_text).style(Styles::secondary());
-    f.render_widget(proc_para, lines[4]);
+    f.render_widget(proc_para, lines[line_idx]);
+    line_idx += 1;
 
-    // Show first few cores
-    let core_count = (lines[5].height as usize)
-        .min(status.cpu.cores.len())
-        .min(3);
-    for (i, core) in status.cpu.cores.iter().take(core_count).enumerate() {
-        if i < lines[5].height as usize {
-            let core_bar = create_progress_bar(core.usage / 100.0, 20);
-            let core_text = format!("Core {}  {}  {:.1}%", core.id + 1, core_bar, core.usage);
+    // Spacing line
+    line_idx += 1;
+
+    // Show cores in a 2-column layout to maximize space usage
+    let cores_area = lines[line_idx];
+    
+    // Split cores area into two columns
+    let core_columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(cores_area);
+    
+    // Calculate how many cores per column (half rounded up)
+    // Limit to max cores that fit in available space
+    let max_cores = status.cpu.cores.len().min(12);
+    let cores_per_column = (max_cores + 1) / 2;
+    let visible_rows = cores_area.height as usize;
+    let rows_to_show = visible_rows.min(cores_per_column);
+    
+    // Render cores in two columns
+    for row in 0..rows_to_show {
+        // Left column
+        if let Some(core) = status.cpu.cores.get(row) {
+            let core_bar = create_progress_bar(core.usage / 100.0, 9); // Compact bar for 2-column layout
+            let core_text = format!("Core {:2}  {}  {:4.1}%", core.id + 1, core_bar, core.usage);
             let core_para = Paragraph::new(core_text).style(Styles::secondary());
-            let core_area = Rect {
-                x: lines[5].x,
-                y: lines[5].y + i as u16,
-                width: lines[5].width,
+            let core_line_area = Rect {
+                x: core_columns[0].x,
+                y: core_columns[0].y + row as u16,
+                width: core_columns[0].width,
                 height: 1,
             };
-            f.render_widget(core_para, core_area);
+            f.render_widget(core_para, core_line_area);
+        }
+        
+        // Right column
+        if let Some(core) = status.cpu.cores.get(row + cores_per_column) {
+            let core_bar = create_progress_bar(core.usage / 100.0, 9); // Compact bar for 2-column layout
+            let core_text = format!("Core {:2}  {}  {:4.1}%", core.id + 1, core_bar, core.usage);
+            let core_para = Paragraph::new(core_text).style(Styles::secondary());
+            let core_line_area = Rect {
+                x: core_columns[1].x,
+                y: core_columns[1].y + row as u16,
+                width: core_columns[1].width,
+                height: 1,
+            };
+            f.render_widget(core_para, core_line_area);
         }
     }
 }
 
+fn render_memory_section_compact(f: &mut Frame, area: Rect, status: &SystemStatus) {
+    // Compact Memory section - shows only essential info
+    let mem_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Styles::border())
+        .title("💾 Memory");
+
+    let inner = mem_block.inner(area);
+    f.render_widget(mem_block, area);
+    
+    let lines = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Used
+            Constraint::Length(1), // Total/Free
+            Constraint::Length(1), // Swap (if applicable)
+        ])
+        .split(inner);
+
+    // Used memory - prominent with bar
+    let used_bar = create_progress_bar(status.memory.used_percent / 100.0, 15);
+    let used_text = format!("Used {} {:.1}%", used_bar, status.memory.used_percent);
+    let used_style = if status.memory.used_percent > 90.0 {
+        Styles::error()
+    } else if status.memory.used_percent > 75.0 {
+        Styles::warning()
+    } else {
+        Styles::primary()
+    };
+    let used_para = Paragraph::new(used_text).style(used_style);
+    f.render_widget(used_para, lines[0]);
+
+    // Total/Free - compact
+    let total_text = format!("{:.1} / {:.1} GB · Free {:.1} GB", 
+        status.memory.used_gb, status.memory.total_gb, status.memory.free_gb);
+    let total_para = Paragraph::new(total_text).style(Styles::secondary());
+    f.render_widget(total_para, lines[1]);
+
+    // Swap - compact (show GB amounts, not just percentage)
+    if status.memory.swap_total_gb > 0.0 {
+        let swap_bar = create_mini_bar(status.memory.swap_percent / 100.0, 8);
+        let swap_text = format!("Swap {} {:.1}% ({:.1} / {:.1} GB)", 
+            swap_bar, status.memory.swap_percent, status.memory.swap_used_gb, status.memory.swap_total_gb);
+        let swap_style = if status.memory.swap_percent > 80.0 {
+            Styles::error()
+        } else if status.memory.swap_percent > 50.0 {
+            Styles::warning()
+        } else {
+            Styles::secondary()
+        };
+        let swap_para = Paragraph::new(swap_text).style(swap_style);
+        f.render_widget(swap_para, lines[2]);
+    }
+}
+
+#[allow(dead_code)] // Kept for potential future use or debugging
 fn render_memory_section(f: &mut Frame, area: Rect, status: &SystemStatus) {
     let mem_block = Block::default()
         .borders(Borders::ALL)
@@ -330,6 +727,360 @@ fn render_memory_section(f: &mut Frame, area: Rect, status: &SystemStatus) {
     }
 }
 
+fn render_disk_section_compact(f: &mut Frame, area: Rect, status: &SystemStatus) {
+    // Compact Disk section - shows essential info on left, breakdown on right
+    let disk_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Styles::border())
+        .title("💿 Disk");
+
+    let inner = disk_block.inner(area);
+    f.render_widget(disk_block, area);
+    
+    #[cfg(windows)]
+    let show_breakdown = true; // Always show breakdown column on Windows
+    #[cfg(not(windows))]
+    let show_breakdown = false;
+    
+    // Split into two columns: left for basic info, right for breakdown
+    // Always show two columns on Windows (even if narrow, we'll make it work)
+    if show_breakdown {
+        // Two-column layout: Basic info | Breakdown
+        // Adjust column widths based on available space
+        let left_pct = if inner.width >= 50 { 50 } else { 45 };
+        let right_pct = if inner.width >= 50 { 50 } else { 55 };
+        
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(left_pct),  // Left: Basic disk info
+                Constraint::Length(1),             // Spacing
+                Constraint::Percentage(right_pct), // Right: Breakdown
+            ])
+            .split(inner);
+        
+        // Left column: Basic disk info + volumes list
+        // Calculate space needed for volumes (header + up to 3 volumes)
+        let volumes_to_show = status.disks.len().min(3);
+        let volumes_height = if !status.disks.is_empty() {
+            1 + volumes_to_show // Header + volumes
+        } else {
+            0
+        };
+        
+        let mut left_constraints = vec![
+            Constraint::Length(1), // Used
+            Constraint::Length(1), // Free
+            Constraint::Length(1), // Read
+            Constraint::Length(1), // Write
+        ];
+        
+        if volumes_height > 0 {
+            left_constraints.push(Constraint::Length(volumes_height as u16)); // Volumes section
+        }
+        
+        let left_lines = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(left_constraints)
+            .split(cols[0]);
+        
+        // Used disk - prominent with bar
+        let used_bar = create_progress_bar(status.disk.used_percent / 100.0, 12);
+        let used_text = format!("Used {} {:.1}%", used_bar, status.disk.used_percent);
+        let used_style = if status.disk.used_percent > 95.0 {
+            Styles::error()
+        } else if status.disk.used_percent > 85.0 {
+            Styles::warning()
+        } else {
+            Styles::primary()
+        };
+        let used_para = Paragraph::new(used_text).style(used_style);
+        f.render_widget(used_para, left_lines[0]);
+        
+        // Free disk - compact
+        let free_text = format!("Free {:.1} / {:.1} GB", status.disk.free_gb, status.disk.total_gb);
+        let free_para = Paragraph::new(free_text).style(Styles::secondary());
+        f.render_widget(free_para, left_lines[1]);
+        
+        // Read speed - compact
+        let (read_val, read_unit) = if status.disk.read_speed_mb < 1.0 {
+            (status.disk.read_speed_mb * 1000.0, "Kbps")
+        } else {
+            (status.disk.read_speed_mb, "MB/s")
+        };
+        let read_bar = create_mini_bar((status.disk.read_speed_mb / 10.0) as f32, 6);
+        let read_text = format!("Read {} {:.1} {}", read_bar, read_val, read_unit);
+        let read_para = Paragraph::new(read_text).style(Styles::secondary());
+        f.render_widget(read_para, left_lines[2]);
+        
+        // Write speed - compact
+        let (write_val, write_unit) = if status.disk.write_speed_mb < 1.0 {
+            (status.disk.write_speed_mb * 1000.0, "Kbps")
+        } else {
+            (status.disk.write_speed_mb, "MB/s")
+        };
+        let write_bar = create_mini_bar((status.disk.write_speed_mb / 10.0) as f32, 6);
+        let write_text = format!("Write {} {:.1} {}", write_bar, write_val, write_unit);
+        let write_para = Paragraph::new(write_text).style(Styles::secondary());
+        f.render_widget(write_para, left_lines[3]);
+        
+        // Volumes list (one per line)
+        if !status.disks.is_empty() && left_lines.len() > 4 {
+            let volumes_area = left_lines[4];
+            let volumes_lines = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(
+                    std::iter::once(Constraint::Length(1)) // Header
+                        .chain(std::iter::repeat(Constraint::Length(1)).take(volumes_to_show)) // Each volume
+                        .collect::<Vec<_>>()
+                )
+                .split(volumes_area);
+            
+            // Header
+            let volumes_header = Paragraph::new("Volumes:")
+                .style(Styles::primary())
+                .alignment(Alignment::Left);
+            f.render_widget(volumes_header, volumes_lines[0]);
+            
+            // List volumes
+            for (i, disk) in status.disks.iter().take(volumes_to_show).enumerate() {
+                if i + 1 < volumes_lines.len() {
+                    // Format: "[Type] C:\ x/x (%)"
+                    let type_indicator = if disk.is_removable {
+                        "[USB]"
+                    } else if disk.disk_type == "SSD" {
+                        "[SSD]"
+                    } else if disk.disk_type == "HDD" {
+                        "[HDD]"
+                    } else {
+                        "[EXT]" // Unknown type is likely virtual
+                    };
+                    
+                    let volume_text = format!(
+                        "{} {}  {:.1}/{:.1} GB ({:.1}%)",
+                        type_indicator, disk.mount_point, disk.used_gb, disk.total_gb, disk.used_percent
+                    );
+                    
+                    // Style based on usage (remove underline - use bold instead for warnings)
+                    let volume_style = if disk.used_percent > 95.0 {
+                        Styles::emphasis() // Bold only, no underline
+                    } else if disk.used_percent > 85.0 {
+                        Styles::emphasis() // Bold only, no underline
+                    } else {
+                        Styles::secondary()
+                    };
+                    
+                    let volume_para = Paragraph::new(volume_text)
+                        .style(volume_style)
+                        .alignment(Alignment::Left);
+                    f.render_widget(volume_para, volumes_lines[i + 1]);
+                }
+            }
+        }
+        
+        // Right column: Disk breakdown (always show on Windows)
+        #[cfg(windows)]
+        {
+                    let right_lines = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Length(1), // Header
+                            Constraint::Length(1), // Category 1
+                            Constraint::Length(1), // Category 2
+                            Constraint::Length(1), // Category 3
+                            Constraint::Length(1), // Category 4
+                            Constraint::Length(1), // Category 5
+                            Constraint::Length(1), // Total line
+                        ])
+                        .split(cols[2]);
+            
+            // Header - always show with volume info
+            let header_text = if let Some(ref breakdown) = status.disk_breakdown {
+                format!("Breakdown ({}):", breakdown.volume)
+            } else {
+                "Breakdown:".to_string()
+            };
+            let header_para = Paragraph::new(header_text)
+                .style(Styles::primary())
+                .alignment(Alignment::Left);
+            f.render_widget(header_para, right_lines[0]);
+            
+            if let Some(ref breakdown) = status.disk_breakdown {
+                if !breakdown.categories.is_empty() {
+                    // Categories (up to 5)
+                    let categories_to_show = breakdown.categories.len().min(5);
+                    for (i, category) in breakdown.categories.iter().take(categories_to_show).enumerate() {
+                        if i + 1 < right_lines.len() {
+                            let bar_width: usize = 8; // Compact bar for right column
+                            let filled = (category.percent / 100.0 * bar_width as f32).round() as usize;
+                            let empty = bar_width.saturating_sub(filled);
+                            let bar = "█".repeat(filled) + &"░".repeat(empty);
+                            
+                            // Truncate category name if needed
+                            let name = if category.name.len() > 6 {
+                                format!("{}…", &category.name[..5])
+                            } else {
+                                category.name.clone()
+                            };
+                            
+                            // Format: "Name  XXX.X GB (XX.X%) ████░░░░"
+                            let category_text = format!(
+                                "{:<7} {:>6.1} GB ({:>4.1}%) {}",
+                                name, category.size_gb, category.percent, bar
+                            );
+                            let category_para = Paragraph::new(category_text)
+                                .style(Styles::secondary())
+                                .alignment(Alignment::Left);
+                            f.render_widget(category_para, right_lines[i + 1]);
+                        }
+                    }
+                    
+                    // Show total at the bottom if we have space
+                    if categories_to_show + 1 < right_lines.len() {
+                        let total_used = breakdown.categories.iter().map(|c| c.size_gb).sum::<f64>();
+                        let total_text = format!("Total: {:.1} GB", total_used);
+                        let total_para = Paragraph::new(total_text)
+                            .style(Styles::primary())
+                            .alignment(Alignment::Left);
+                        f.render_widget(total_para, right_lines[categories_to_show + 1]);
+                    }
+                } else {
+                    // No categories yet
+                    let msg = Paragraph::new("Calculating...")
+                        .style(Styles::secondary())
+                        .alignment(Alignment::Left);
+                    f.render_widget(msg, right_lines[1]);
+                }
+            } else {
+                // Breakdown not available yet - show placeholder
+                let msg = Paragraph::new("Calculating...\n(Press 'd')")
+                    .style(Styles::secondary())
+                    .alignment(Alignment::Left);
+                f.render_widget(msg, right_lines[1]);
+            }
+        }
+    } else {
+        // Single column layout (no breakdown or not enough space)
+        let volumes_to_show = status.disks.len().min(3);
+        let volumes_height = if !status.disks.is_empty() {
+            1 + volumes_to_show // Header + volumes
+        } else {
+            0
+        };
+        
+        let mut constraints = vec![
+            Constraint::Length(1), // Used
+            Constraint::Length(1), // Free
+            Constraint::Length(1), // Read
+            Constraint::Length(1), // Write
+        ];
+        
+        if volumes_height > 0 {
+            constraints.push(Constraint::Length(volumes_height as u16)); // Volumes section
+        }
+        
+        let lines = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(inner);
+        
+        // Used disk - prominent with bar
+        let used_bar = create_progress_bar(status.disk.used_percent / 100.0, 15);
+        let used_text = format!("Used {} {:.1}%", used_bar, status.disk.used_percent);
+        let used_style = if status.disk.used_percent > 95.0 {
+            Styles::error()
+        } else if status.disk.used_percent > 85.0 {
+            Styles::warning()
+        } else {
+            Styles::primary()
+        };
+        let used_para = Paragraph::new(used_text).style(used_style);
+        f.render_widget(used_para, lines[0]);
+        
+        // Free disk - compact
+        let free_text = format!("Free {:.1} / {:.1} GB", status.disk.free_gb, status.disk.total_gb);
+        let free_para = Paragraph::new(free_text).style(Styles::secondary());
+        f.render_widget(free_para, lines[1]);
+        
+        // Read speed - compact
+        let (read_val, read_unit) = if status.disk.read_speed_mb < 1.0 {
+            (status.disk.read_speed_mb * 1000.0, "Kbps")
+        } else {
+            (status.disk.read_speed_mb, "MB/s")
+        };
+        let read_bar = create_mini_bar((status.disk.read_speed_mb / 10.0) as f32, 6);
+        let read_text = format!("Read {} {:.1} {}", read_bar, read_val, read_unit);
+        let read_para = Paragraph::new(read_text).style(Styles::secondary());
+        f.render_widget(read_para, lines[2]);
+        
+        // Write speed - compact
+        let (write_val, write_unit) = if status.disk.write_speed_mb < 1.0 {
+            (status.disk.write_speed_mb * 1000.0, "Kbps")
+        } else {
+            (status.disk.write_speed_mb, "MB/s")
+        };
+        let write_bar = create_mini_bar((status.disk.write_speed_mb / 10.0) as f32, 6);
+        let write_text = format!("Write {} {:.1} {}", write_bar, write_val, write_unit);
+        let write_para = Paragraph::new(write_text).style(Styles::secondary());
+        f.render_widget(write_para, lines[3]);
+        
+        // Volumes list (one per line)
+        if !status.disks.is_empty() && lines.len() > 4 {
+            let volumes_area = lines[4];
+            let volumes_lines = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(
+                    std::iter::once(Constraint::Length(1)) // Header
+                        .chain(std::iter::repeat(Constraint::Length(1)).take(volumes_to_show)) // Each volume
+                        .collect::<Vec<_>>()
+                )
+                .split(volumes_area);
+            
+            // Header
+            let volumes_header = Paragraph::new("Volumes:")
+                .style(Styles::primary())
+                .alignment(Alignment::Left);
+            f.render_widget(volumes_header, volumes_lines[0]);
+            
+            // List volumes
+            for (i, disk) in status.disks.iter().take(volumes_to_show).enumerate() {
+                if i + 1 < volumes_lines.len() {
+                    // Format: "[Type] C:\ x/x (%)"
+                    let type_indicator = if disk.is_removable {
+                        "[USB]"
+                    } else if disk.disk_type == "SSD" {
+                        "[SSD]"
+                    } else if disk.disk_type == "HDD" {
+                        "[HDD]"
+                    } else {
+                        "[Virtual]" // Unknown type is likely virtual
+                    };
+                    
+                    let volume_text = format!(
+                        "{} {}  {:.1}/{:.1} GB ({:.1}%)",
+                        type_indicator, disk.mount_point, disk.used_gb, disk.total_gb, disk.used_percent
+                    );
+                    
+                    // Style based on usage (remove underline - use bold instead for warnings)
+                    let volume_style = if disk.used_percent > 95.0 {
+                        Styles::emphasis() // Bold only, no underline
+                    } else if disk.used_percent > 85.0 {
+                        Styles::emphasis() // Bold only, no underline
+                    } else {
+                        Styles::secondary()
+                    };
+                    
+                    let volume_para = Paragraph::new(volume_text)
+                        .style(volume_style)
+                        .alignment(Alignment::Left);
+                    f.render_widget(volume_para, volumes_lines[i + 1]);
+                }
+            }
+        }
+    }
+}
+
+#[allow(dead_code)] // Kept for potential future use or debugging
 fn render_disk_section(f: &mut Frame, area: Rect, status: &SystemStatus) {
     let disk_block = Block::default()
         .borders(Borders::ALL)
@@ -339,6 +1090,7 @@ fn render_disk_section(f: &mut Frame, area: Rect, status: &SystemStatus) {
     let inner = disk_block.inner(area);
     f.render_widget(disk_block, area);
 
+    // Always show read/write lines
     let lines = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -349,36 +1101,238 @@ fn render_disk_section(f: &mut Frame, area: Rect, status: &SystemStatus) {
         ])
         .split(inner);
 
-    // Used disk
-    let used_bar = create_progress_bar(status.disk.used_percent / 100.0, 20);
-    let used_text = format!("Used    {}  {:.1}%", used_bar, status.disk.used_percent);
+    // Used disk - just percentage
+    let used_text = format!("Used    {:.1}%", status.disk.used_percent);
     let used_para = Paragraph::new(used_text).style(Styles::primary());
     f.render_widget(used_para, lines[0]);
 
-    // Free disk
-    let free_text = format!("Free    {:.1} GB", status.disk.free_gb);
+    // Free disk - show "X.X GB / Y.Y GB" format
+    let free_text = format!(
+        "Free    {:.1} GB / {:.1} GB",
+        status.disk.free_gb, status.disk.total_gb
+    );
     let free_para = Paragraph::new(free_text).style(Styles::secondary());
     f.render_widget(free_para, lines[1]);
 
-    // Read speed
-    let read_bar = create_speed_bar(status.disk.read_speed_mb / 100.0, 5);
-    let read_text = format!(
-        "Read    {}  {:.1} MB/s",
-        read_bar, status.disk.read_speed_mb
-    );
+    // Read speed - use Kbps if < 1 MB/s, otherwise MB/s
+    let (read_value, read_unit, read_bar_max) = if status.disk.read_speed_mb < 1.0 {
+        let kbps = status.disk.read_speed_mb * 1000.0;
+        (kbps, "Kbps", 100.0) // Scale bar for Kbps (0-100 Kbps)
+    } else {
+        (status.disk.read_speed_mb, "MB/s", 10.0) // Scale bar for MB/s (0-10 MB/s)
+    };
+    let read_bar = create_speed_bar(status.disk.read_speed_mb / read_bar_max, 5);
+    let read_text = format!("Read    {}  {:.1} {}", read_bar, read_value, read_unit);
     let read_para = Paragraph::new(read_text).style(Styles::secondary());
     f.render_widget(read_para, lines[2]);
 
-    // Write speed
-    let write_bar = create_speed_bar(status.disk.write_speed_mb / 100.0, 5);
-    let write_text = format!(
-        "Write   {}  {:.1} MB/s",
-        write_bar, status.disk.write_speed_mb
-    );
+    // Write speed - use Kbps if < 1 MB/s, otherwise MB/s
+    let (write_value, write_unit, write_bar_max) = if status.disk.write_speed_mb < 1.0 {
+        let kbps = status.disk.write_speed_mb * 1000.0;
+        (kbps, "Kbps", 100.0) // Scale bar for Kbps (0-100 Kbps)
+    } else {
+        (status.disk.write_speed_mb, "MB/s", 10.0) // Scale bar for MB/s (0-10 MB/s)
+    };
+    let write_bar = create_speed_bar(status.disk.write_speed_mb / write_bar_max, 5);
+    let write_text = format!("Write   {}  {:.1} {}", write_bar, write_value, write_unit);
     let write_para = Paragraph::new(write_text).style(Styles::secondary());
     f.render_widget(write_para, lines[3]);
 }
 
+fn render_power_section_compact(f: &mut Frame, area: Rect, status: &SystemStatus) {
+    // Power section with all details - Level spans full width, then 2-column layout below
+    let power_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Styles::border())
+        .title("🔋 Power");
+
+    let inner = power_block.inner(area);
+    f.render_widget(power_block, area);
+
+    if let Some(power) = &status.power {
+        // First, split into Level and content area
+        let main_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Level
+                Constraint::Min(4),    // Content area (2 columns with 4 items each)
+            ])
+            .split(inner);
+
+        // Battery level - spans full width
+        let level_bar = create_progress_bar(power.level_percent / 100.0, 12);
+        let level_text = format!("Level {} {:.1}%", level_bar, power.level_percent);
+        let level_style = if power.level_percent < 20.0 {
+            Styles::error()
+        } else if power.level_percent < 40.0 {
+            Styles::warning()
+        } else {
+            Styles::primary()
+        };
+        let level_para = Paragraph::new(level_text).style(level_style);
+        f.render_widget(level_para, main_layout[0]);
+
+        // Split content area into 2 columns
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(main_layout[1]);
+
+        // Left column: Status, Time, Health, Cycles (4 items)
+        let left_lines = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Status
+                Constraint::Length(1), // Time
+                Constraint::Length(1), // Health
+                Constraint::Length(1), // Cycles
+            ])
+            .split(columns[0]);
+
+        // Right column: Voltage, Power, Design, Full (4 items)
+        let mut right_constraints = vec![];
+        if power.voltage_volts.is_some() {
+            right_constraints.push(Constraint::Length(1)); // Voltage
+        }
+        if power.energy_rate_watts.is_some() {
+            right_constraints.push(Constraint::Length(1)); // Power
+        }
+        if power.design_capacity_mwh.is_some() {
+            right_constraints.push(Constraint::Length(1)); // Design
+        }
+        if power.full_charge_capacity_mwh.is_some() {
+            right_constraints.push(Constraint::Length(1)); // Full
+        }
+        // Ensure we have 4 items even if some are missing
+        while right_constraints.len() < 4 {
+            right_constraints.push(Constraint::Length(1));
+        }
+
+        let right_lines = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(right_constraints)
+            .split(columns[1]);
+
+        let mut left_idx = 0;
+        let mut right_idx = 0;
+
+        // LEFT COLUMN
+
+        // Status
+        let status_text = format!("Status {}", power.status);
+        let status_para = Paragraph::new(status_text).style(Styles::secondary());
+        f.render_widget(status_para, left_lines[left_idx]);
+        left_idx += 1;
+
+        // Time remaining/charging
+        if let Some(time_sec) = power.time_to_empty_seconds {
+            let time_str = format_uptime(time_sec);
+            let time_text = format!("Time   {} left", time_str);
+            let time_para = Paragraph::new(time_text).style(Styles::secondary());
+            f.render_widget(time_para, left_lines[left_idx]);
+        } else if let Some(time_sec) = power.time_to_full_seconds {
+            let time_str = format_uptime(time_sec);
+            let time_text = format!("Charge {} full", time_str);
+            let time_para = Paragraph::new(time_text).style(Styles::secondary());
+            f.render_widget(time_para, left_lines[left_idx]);
+        } else {
+            // No time estimate - show empty
+            let time_text = "Time   -";
+            let time_para = Paragraph::new(time_text).style(Styles::secondary());
+            f.render_widget(time_para, left_lines[left_idx]);
+        }
+        left_idx += 1;
+
+        // Health (moved before Cycles)
+        let health_text = format!("Health  {}", power.health);
+        let health_para = Paragraph::new(health_text).style(Styles::secondary());
+        f.render_widget(health_para, left_lines[left_idx]);
+        left_idx += 1;
+
+        // Cycles
+        if let Some(cycles) = power.cycles {
+            let cycles_text = format!("Cycles {}", cycles);
+            let cycles_para = Paragraph::new(cycles_text).style(Styles::secondary());
+            f.render_widget(cycles_para, left_lines[left_idx]);
+        } else {
+            let cycles_text = "Cycles -";
+            let cycles_para = Paragraph::new(cycles_text).style(Styles::secondary());
+            f.render_widget(cycles_para, left_lines[left_idx]);
+        }
+
+        // RIGHT COLUMN
+
+        // Voltage
+        if let Some(voltage) = power.voltage_volts {
+            let volt_text = format!("Volt   {:.2} V", voltage);
+            let volt_para = Paragraph::new(volt_text).style(Styles::secondary());
+            if right_idx < right_lines.len() {
+                f.render_widget(volt_para, right_lines[right_idx]);
+                right_idx += 1;
+            }
+        } else if right_idx < right_lines.len() {
+            // Placeholder if voltage not available
+            let volt_text = "Volt   -";
+            let volt_para = Paragraph::new(volt_text).style(Styles::secondary());
+            f.render_widget(volt_para, right_lines[right_idx]);
+            right_idx += 1;
+        }
+
+        // Power consumption
+        if let Some(watts) = power.energy_rate_watts {
+            let power_text = format!("Power   {:.1} W", watts);
+            let power_para = Paragraph::new(power_text).style(Styles::secondary());
+            if right_idx < right_lines.len() {
+                f.render_widget(power_para, right_lines[right_idx]);
+                right_idx += 1;
+            }
+        } else if right_idx < right_lines.len() {
+            // Placeholder if power not available
+            let power_text = "Power   -";
+            let power_para = Paragraph::new(power_text).style(Styles::secondary());
+            f.render_widget(power_para, right_lines[right_idx]);
+            right_idx += 1;
+        }
+
+        // Design Capacity
+        if let Some(design_cap) = power.design_capacity_mwh {
+            let design_text = format!("Design  {:.0} mWh", design_cap);
+            let design_para = Paragraph::new(design_text).style(Styles::secondary());
+            if right_idx < right_lines.len() {
+                f.render_widget(design_para, right_lines[right_idx]);
+                right_idx += 1;
+            }
+        } else if right_idx < right_lines.len() {
+            // Placeholder if design capacity not available
+            let design_text = "Design  -";
+            let design_para = Paragraph::new(design_text).style(Styles::secondary());
+            f.render_widget(design_para, right_lines[right_idx]);
+            right_idx += 1;
+        }
+
+        // Full Charge Capacity
+        if let Some(full_cap) = power.full_charge_capacity_mwh {
+            let full_text = format!("Full    {:.0} mWh", full_cap);
+            let full_para = Paragraph::new(full_text).style(Styles::secondary());
+            if right_idx < right_lines.len() {
+                f.render_widget(full_para, right_lines[right_idx]);
+            }
+        } else if right_idx < right_lines.len() {
+            // Placeholder if full capacity not available
+            let full_text = "Full    -";
+            let full_para = Paragraph::new(full_text).style(Styles::secondary());
+            f.render_widget(full_para, right_lines[right_idx]);
+        }
+    } else {
+        // No power info available
+        let no_power = Paragraph::new("No battery info")
+            .style(Styles::secondary())
+            .alignment(Alignment::Center);
+        f.render_widget(no_power, inner);
+    }
+}
+
+#[allow(dead_code)] // Kept for potential future use or debugging
 fn render_power_section(f: &mut Frame, area: Rect, status: &SystemStatus) {
     let power_block = Block::default()
         .borders(Borders::ALL)
@@ -590,19 +1544,28 @@ fn render_network_section(f: &mut Frame, area: Rect, status: &SystemStatus) {
 
     let mut line_idx = 0;
 
-    // Download
-    let down_bar = create_speed_bar(status.network.download_mb / 10.0, 5);
-    let down_text = format!(
-        "Down    {}  {:.1} MB/s",
-        down_bar, status.network.download_mb
-    );
+    // Download - use Kbps if < 1 MB/s, otherwise MB/s
+    let (down_value, down_unit, down_bar_max) = if status.network.download_mb < 1.0 {
+        let kbps = status.network.download_mb * 1000.0;
+        (kbps, "Kbps", 100.0) // Scale bar for Kbps (0-100 Kbps)
+    } else {
+        (status.network.download_mb, "MB/s", 10.0) // Scale bar for MB/s (0-10 MB/s)
+    };
+    let down_bar = create_speed_bar(status.network.download_mb / down_bar_max, 5);
+    let down_text = format!("Down    {}  {:.1} {}", down_bar, down_value, down_unit);
     let down_para = Paragraph::new(down_text).style(Styles::secondary());
     f.render_widget(down_para, lines[line_idx]);
     line_idx += 1;
 
-    // Upload
-    let up_bar = create_speed_bar(status.network.upload_mb / 10.0, 5);
-    let up_text = format!("Up      {}  {:.1} MB/s", up_bar, status.network.upload_mb);
+    // Upload - use Kbps if < 1 MB/s, otherwise MB/s
+    let (up_value, up_unit, up_bar_max) = if status.network.upload_mb < 1.0 {
+        let kbps = status.network.upload_mb * 1000.0;
+        (kbps, "Kbps", 100.0) // Scale bar for Kbps (0-100 Kbps)
+    } else {
+        (status.network.upload_mb, "MB/s", 10.0) // Scale bar for MB/s (0-10 MB/s)
+    };
+    let up_bar = create_speed_bar(status.network.upload_mb / up_bar_max, 5);
+    let up_text = format!("Up      {}  {:.1} {}", up_bar, up_value, up_unit);
     let up_para = Paragraph::new(up_text).style(Styles::secondary());
     f.render_widget(up_para, lines[line_idx]);
     line_idx += 1;
@@ -665,72 +1628,196 @@ fn render_network_section(f: &mut Frame, area: Rect, status: &SystemStatus) {
     }
 }
 
+#[cfg(windows)]
+fn render_top_io_section(f: &mut Frame, area: Rect, status: &SystemStatus) {
+    if status.top_io_processes.is_empty() {
+        return;
+    }
+
+    let io_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Styles::border())
+        .title("💾 Top Disk I/O");
+
+    let inner = io_block.inner(area);
+    f.render_widget(io_block, area);
+
+    let process_count = status.top_io_processes.len().min(5);
+    let lines = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            (0..process_count)
+                .map(|_| Constraint::Length(1))
+                .collect::<Vec<_>>(),
+        )
+        .split(inner);
+
+    for (i, io_proc) in status.top_io_processes.iter().take(process_count).enumerate() {
+        let read_mb = io_proc.read_bytes_per_sec / 1_000_000.0;
+        let write_mb = io_proc.write_bytes_per_sec / 1_000_000.0;
+
+        // Format process name (truncate if too long)
+        let name = if io_proc.name.len() > 18 {
+            format!("{}…", &io_proc.name[..17])
+        } else {
+            io_proc.name.clone()
+        };
+
+        // Format I/O rates - use Kbps if < 1 MB/s
+        let (read_val, read_unit) = if read_mb < 1.0 {
+            (read_mb * 1000.0, "Kbps")
+        } else {
+            (read_mb, "MB/s")
+        };
+        let (write_val, write_unit) = if write_mb < 1.0 {
+            (write_mb * 1000.0, "Kbps")
+        } else {
+            (write_mb, "MB/s")
+        };
+
+        let io_text = format!(
+            "{:<19} R: {:>5.1} {}  W: {:>5.1} {}",
+            name, read_val, read_unit, write_val, write_unit
+        );
+        let io_para = Paragraph::new(io_text).style(Styles::secondary());
+        f.render_widget(io_para, lines[i]);
+    }
+}
+
 fn render_processes_section(f: &mut Frame, area: Rect, status: &SystemStatus) {
+    // Maximized processes section with better visual presentation
     let processes_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Styles::border())
-        .title("▶ Processes");
+        .title(format!("▶ Top Processes (showing {} of {})", 
+            status.processes.len().min(20), status.cpu.process_count));
 
     let inner = processes_block.inner(area);
     f.render_widget(processes_block, area);
+    
+    // Check if we have processes to display
+    if status.processes.is_empty() {
+        let msg = Paragraph::new(format!("Loading... ({} total processes)", status.cpu.process_count))
+            .style(Styles::secondary())
+            .alignment(Alignment::Center);
+        f.render_widget(msg, inner);
+        return;
+    }
 
-    // Two column layout for processes
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(inner);
+    if inner.height < 3 {
+        return; // Need at least 3 lines for header + 1 process
+    }
 
-    // Helper to format a process entry with consistent alignment
-    // Format: "name         pid  bar cpu%  mem"
-    // Compact layout with fixed widths for alignment
-    let format_process = |proc: &crate::status::ProcessInfo| -> String {
-        // Fixed name width of 14 chars for compact display
-        let name = if proc.name.len() > 14 {
-            format!("{}…", &proc.name[..13])
+    // Calculate how many processes we can fit
+    let available_rows = inner.height as usize - 1; // Reserve 1 line for header
+    let processes_to_show = status.processes.len().min(available_rows).min(20); // Show up to 20 processes
+    
+    // Create a table-like layout with header
+    let header_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    };
+    
+    // Header row with column labels
+    let header_text = format!("{:<20} {:>6} {:>8} {:>10} {:>8} {:>12}", 
+        "Process", "PID", "CPU %", "Memory", "Handles", "Page Faults");
+    let header_para = Paragraph::new(header_text)
+        .style(Styles::primary())
+        .alignment(Alignment::Left);
+    f.render_widget(header_para, header_area);
+    
+    // Separator line
+    let separator = "─".repeat(inner.width as usize);
+    let separator_area = Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: 1,
+    };
+    let separator_para = Paragraph::new(separator).style(Styles::border());
+    f.render_widget(separator_para, separator_area);
+    
+    // Process rows - use full width for better readability
+    let process_start_y = inner.y + 2;
+    let max_process_rows = (inner.height - 2) as usize; // Subtract header and separator
+    
+    for (i, proc) in status.processes.iter().take(processes_to_show.min(max_process_rows)).enumerate() {
+        let row_y = process_start_y + i as u16;
+        if row_y >= inner.y + inner.height {
+            break;
+        }
+        
+        // Format process name (truncate if needed)
+        let name = if proc.name.len() > 18 {
+            format!("{}…", &proc.name[..17])
         } else {
             proc.name.clone()
         };
-
-        let proc_bar = create_mini_bar(proc.cpu_usage / 100.0, 6);
-
-        // Compact format: name(14) pid(5) bar(6) cpu(5) mem(5)
-        format!(
-            "{:<14} {:>5} {} {:>4.1}% {:>4}M",
-            name, proc.pid, proc_bar, proc.cpu_usage, proc.memory_mb as u64
-        )
-    };
-
-    // Left column - first 5 processes
-    let left_count = (inner.height as usize).min(5);
-    for (i, proc) in status.processes.iter().take(left_count).enumerate() {
-        let proc_text = format_process(proc);
-        let proc_para = Paragraph::new(proc_text).style(Styles::secondary());
+        
+        // CPU usage bar - more visual
+        let cpu_bar_width = 12;
+        let cpu_bar = create_progress_bar((proc.cpu_usage.min(100.0) / 100.0) as f32, cpu_bar_width);
+        
+        // Memory formatting
+        let memory_str = if proc.memory_mb >= 1024.0 {
+            format!("{:.1} GB", proc.memory_mb / 1024.0)
+        } else {
+            format!("{:.0} MB", proc.memory_mb)
+        };
+        
+        // Handle count (Windows only)
+        #[cfg(windows)]
+        let handles_str = if let Some(h) = proc.handle_count {
+            if h > 1000 {
+                format!("{}⚠️", h)
+            } else {
+                format!("{}", h)
+            }
+        } else {
+            "-".to_string()
+        };
+        #[cfg(not(windows))]
+        let handles_str = "-".to_string();
+        
+        // Page faults (Windows only)
+        #[cfg(windows)]
+        let faults_str = if let Some(f) = proc.page_faults_per_sec {
+            if f > 100 {
+                format!("{}⚠️", f)
+            } else {
+                format!("{}", f)
+            }
+        } else {
+            "-".to_string()
+        };
+        #[cfg(not(windows))]
+        let faults_str = "-".to_string();
+        
+        // Format the process row
+        let proc_text = format!("{:<20} {:>6} {} {:>6.1}% {:>8} {:>8} {:>12}", 
+            name, proc.pid, cpu_bar, proc.cpu_usage.min(100.0), memory_str, handles_str, faults_str);
+        
+        // Style based on CPU usage
+        let proc_style = if proc.cpu_usage > 50.0 {
+            Styles::warning()
+        } else if proc.cpu_usage > 20.0 {
+            Styles::secondary()
+        } else {
+            Styles::secondary()
+        };
+        
         let proc_area = Rect {
-            x: columns[0].x,
-            y: columns[0].y + i as u16,
-            width: columns[0].width,
+            x: inner.x,
+            y: row_y,
+            width: inner.width,
             height: 1,
         };
-        f.render_widget(proc_para, proc_area);
-    }
-
-    // Right column - next 5 processes (6-10)
-    let right_count = (inner.height as usize).min(5);
-    for (i, proc) in status
-        .processes
-        .iter()
-        .skip(5)
-        .take(right_count)
-        .enumerate()
-    {
-        let proc_text = format_process(proc);
-        let proc_para = Paragraph::new(proc_text).style(Styles::secondary());
-        let proc_area = Rect {
-            x: columns[1].x,
-            y: columns[1].y + i as u16,
-            width: columns[1].width,
-            height: 1,
-        };
+        
+        let proc_para = Paragraph::new(proc_text)
+            .style(proc_style)
+            .alignment(Alignment::Left);
         f.render_widget(proc_para, proc_area);
     }
 }
@@ -754,6 +1841,178 @@ fn create_speed_bar(value: f64, width: usize) -> String {
     format!("{}{}", "▰".repeat(filled), "▱".repeat(empty))
 }
 
+#[cfg(windows)]
+fn render_disk_breakdown_placeholder(f: &mut Frame, area: Rect) {
+    let breakdown_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Styles::border())
+        .title("💿 Disk Breakdown");
+
+    let inner = breakdown_block.inner(area);
+    f.render_widget(breakdown_block, area);
+
+    let msg = Paragraph::new("Calculating... (Press 'd' to refresh manually)")
+        .style(Styles::secondary())
+        .alignment(Alignment::Center);
+    f.render_widget(msg, inner);
+}
+
+#[cfg(windows)]
+fn render_disk_breakdown_section(
+    f: &mut Frame,
+    area: Rect,
+    breakdown: &crate::status::DiskBreakdown,
+) {
+    let breakdown_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Styles::border())
+        .title("💿 Disk Breakdown");
+
+    let inner = breakdown_block.inner(area);
+    f.render_widget(breakdown_block, area);
+
+    if breakdown.categories.is_empty() {
+        let msg = Paragraph::new("No data available (Press 'd' to refresh)")
+            .style(Styles::secondary())
+            .alignment(Alignment::Center);
+        f.render_widget(msg, inner);
+        return;
+    }
+
+    // Calculate how many categories we can fit
+    let available_rows = inner.height as usize;
+    let categories_to_show = breakdown.categories.len().min(available_rows.saturating_sub(2)); // Reserve 2 for header/footer
+
+    let mut constraints = vec![Constraint::Length(1)]; // Header
+    for _ in 0..categories_to_show {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Length(1)); // Footer
+
+    let lines = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    // Header
+    let header_text = format!("{:<20} {:>8} {:>6} {}", "Category", "Size", "Percent", "Usage");
+    let header_para = Paragraph::new(header_text)
+        .style(Styles::primary())
+        .alignment(Alignment::Left);
+    f.render_widget(header_para, lines[0]);
+
+    // Categories
+    for (i, category) in breakdown.categories.iter().take(categories_to_show).enumerate() {
+        let bar_width: usize = 30;
+        let filled = (category.percent / 100.0 * bar_width as f32).round() as usize;
+        let empty = bar_width.saturating_sub(filled);
+        let bar = "█".repeat(filled) + &"░".repeat(empty);
+
+        let category_text = format!(
+            "{:<20} {:>7.1} GB {:>5.1}% {}",
+            category.name, category.size_gb, category.percent, bar
+        );
+        let category_para = Paragraph::new(category_text)
+            .style(Styles::secondary())
+            .alignment(Alignment::Left);
+        f.render_widget(category_para, lines[i + 1]);
+    }
+
+    // Footer with cache info and total
+    let footer_text = if let Some(cached_at) = breakdown.cached_at {
+        format!(
+            "Total: {:.1} GB · Cached at: {}",
+            breakdown.total_disk_gb,
+            cached_at.format("%H:%M")
+        )
+    } else {
+        format!("Total: {:.1} GB", breakdown.total_disk_gb)
+    };
+    let footer_para = Paragraph::new(footer_text)
+        .style(Styles::secondary())
+        .alignment(Alignment::Left);
+    f.render_widget(footer_para, lines[lines.len() - 1]);
+}
+
+#[cfg(windows)]
+fn render_boot_info_section(
+    f: &mut Frame,
+    area: Rect,
+    boot_info: &crate::status::BootInfo,
+) {
+    let boot_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Styles::border())
+        .title("🔄 System Diagnostics");
+
+    let inner = boot_block.inner(area);
+    f.render_widget(boot_block, area);
+
+    let lines = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Uptime
+            Constraint::Length(1), // Last Boot
+            Constraint::Length(1), // Boot Time
+            Constraint::Length(1), // Shutdown Type
+        ])
+        .split(inner);
+
+    // Uptime
+    let uptime_str = format_uptime_detailed(boot_info.uptime_seconds);
+    let uptime_text = format!("Uptime:      {}", uptime_str);
+    let uptime_para = Paragraph::new(uptime_text)
+        .style(Styles::primary())
+        .alignment(Alignment::Left);
+    f.render_widget(uptime_para, lines[0]);
+
+    // Last Boot
+    let boot_time_str = boot_info.last_boot_time.format("%Y-%m-%d %H:%M:%S");
+    let days_ago = chrono::Local::now()
+        .signed_duration_since(boot_info.last_boot_time)
+        .num_days();
+    let ago_str = if days_ago == 0 {
+        "today".to_string()
+    } else if days_ago == 1 {
+        "yesterday".to_string()
+    } else {
+        format!("{}d ago", days_ago)
+    };
+    let boot_text = format!("Last Boot:   {} ({})", boot_time_str, ago_str);
+    let boot_para = Paragraph::new(boot_text)
+        .style(Styles::secondary())
+        .alignment(Alignment::Left);
+    f.render_widget(boot_para, lines[1]);
+
+    // Boot Duration
+    let boot_duration_text = format!("Boot Time:   ~{} seconds (estimated)", boot_info.boot_duration_seconds);
+    let boot_duration_para = Paragraph::new(boot_duration_text)
+        .style(Styles::secondary())
+        .alignment(Alignment::Left);
+    f.render_widget(boot_duration_para, lines[2]);
+
+    // Shutdown Type
+    let shutdown_text = format!("Shutdown:    {} (graceful shutdown)", boot_info.shutdown_type);
+    let shutdown_para = Paragraph::new(shutdown_text)
+        .style(Styles::secondary())
+        .alignment(Alignment::Left);
+    f.render_widget(shutdown_para, lines[3]);
+}
+
+fn format_uptime_detailed(seconds: u64) -> String {
+    let days = seconds / 86400;
+    let hours = (seconds % 86400) / 3600;
+    let minutes = (seconds % 3600) / 60;
+
+    if days > 0 {
+        format!("{} days, {} hours, {} minutes", days, hours, minutes)
+    } else if hours > 0 {
+        format!("{} hours, {} minutes", hours, minutes)
+    } else {
+        format!("{} minutes", minutes)
+    }
+}
+
 fn format_uptime(seconds: u64) -> String {
     let days = seconds / 86400;
     let hours = (seconds % 86400) / 3600;
@@ -768,6 +2027,7 @@ fn format_uptime(seconds: u64) -> String {
     }
 }
 
+#[allow(dead_code)] // Kept for potential future use
 fn format_time(seconds: u64) -> String {
     let hours = seconds / 3600;
     let minutes = (seconds % 3600) / 60;

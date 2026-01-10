@@ -3,12 +3,23 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::Path;
 use std::time::{Duration, Instant};
 use sysinfo::System;
 
 // Thread-local state for tracking metrics over time (for delta calculations)
 thread_local! {
     static METRICS_STATE: RefCell<MetricsState> = RefCell::new(MetricsState::default());
+}
+
+#[cfg(windows)]
+use std::sync::RwLock;
+
+#[cfg(windows)]
+lazy_static::lazy_static! {
+    static ref DISK_BREAKDOWN_CACHE: RwLock<Option<(DiskBreakdown, std::time::Instant)>> = 
+        RwLock::new(None);
 }
 
 #[derive(Debug)]
@@ -34,10 +45,175 @@ struct NetworkState {
     previous_transmitted: u64,
 }
 
-#[derive(Debug, Default)]
+#[cfg(windows)]
+use windows::{
+    core::w,
+    Win32::{
+        Foundation::ERROR_SUCCESS,
+        System::Performance::{
+            PdhAddCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterValue,
+            PdhOpenQueryW, PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE,
+        },
+    },
+};
+
 struct DiskState {
-    _previous_read: u64,
-    _previous_written: u64,
+    #[cfg(windows)]
+    io_monitor: Option<WindowsDiskIOMonitor>,
+    #[cfg(not(windows))]
+    _phantom: std::marker::PhantomData<()>,
+}
+
+#[cfg(windows)]
+impl std::fmt::Debug for DiskState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiskState")
+            .field("io_monitor", &"<WindowsDiskIOMonitor>")
+            .finish()
+    }
+}
+
+#[cfg(not(windows))]
+impl std::fmt::Debug for DiskState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiskState")
+            .field("_phantom", &self._phantom)
+            .finish()
+    }
+}
+
+#[cfg(windows)]
+struct WindowsDiskIOMonitor {
+    query: isize,           // PDH_HQUERY is a type alias for isize
+    read_counter: isize,    // PDH_HCOUNTER is a type alias for isize
+    write_counter: isize,   // PDH_HCOUNTER is a type alias for isize
+    initialized: bool,
+}
+
+#[cfg(windows)]
+impl WindowsDiskIOMonitor {
+    fn new() -> Result<Self, String> {
+        unsafe {
+            let mut query: isize = 0;
+            let status = PdhOpenQueryW(None, 0, &mut query);
+            
+            if status != ERROR_SUCCESS.0 {
+                return Err(format!("Failed to open PDH query: {}", status));
+            }
+
+            // Add Disk Read Bytes/sec counter for _Total (all physical disks)
+            let mut read_counter: isize = 0;
+            let read_status = PdhAddCounterW(
+                query,
+                w!("\\PhysicalDisk(_Total)\\Disk Read Bytes/sec"),
+                0,
+                &mut read_counter,
+            );
+
+            if read_status != ERROR_SUCCESS.0 {
+                let _ = PdhCloseQuery(query);
+                return Err(format!("Failed to add read counter: {}", read_status));
+            }
+
+            // Add Disk Write Bytes/sec counter for _Total (all physical disks)
+            let mut write_counter: isize = 0;
+            let write_status = PdhAddCounterW(
+                query,
+                w!("\\PhysicalDisk(_Total)\\Disk Write Bytes/sec"),
+                0,
+                &mut write_counter,
+            );
+
+            if write_status != ERROR_SUCCESS.0 {
+                let _ = PdhCloseQuery(query);
+                return Err(format!("Failed to add write counter: {}", write_status));
+            }
+
+            Ok(Self {
+                query,
+                read_counter,
+                write_counter,
+                initialized: false,
+            })
+        }
+    }
+
+    fn collect(&mut self, delay: Duration) -> Result<(f64, f64), String> {
+        unsafe {
+            // First collection - initialize counters
+            if !self.initialized {
+                let status = PdhCollectQueryData(self.query);
+                if status != ERROR_SUCCESS.0 {
+                    return Err(format!("Failed to collect initial data: {}", status));
+                }
+                self.initialized = true;
+                std::thread::sleep(delay);
+            }
+
+            // Second collection - get actual values
+            let status = PdhCollectQueryData(self.query);
+            if status != ERROR_SUCCESS.0 {
+                return Err(format!("Failed to collect query data: {}", status));
+            }
+
+            // Get read bytes/sec (already in bytes/sec, pre-calculated)
+            let mut read_value = PDH_FMT_COUNTERVALUE::default();
+            let read_status = PdhGetFormattedCounterValue(
+                self.read_counter,
+                PDH_FMT_DOUBLE,
+                None,
+                &mut read_value,
+            );
+
+            let read_bytes_per_sec = if read_status == ERROR_SUCCESS.0 {
+                read_value.Anonymous.doubleValue
+            } else {
+                0.0
+            };
+
+            // Get write bytes/sec (already in bytes/sec, pre-calculated)
+            let mut write_value = PDH_FMT_COUNTERVALUE::default();
+            let write_status = PdhGetFormattedCounterValue(
+                self.write_counter,
+                PDH_FMT_DOUBLE,
+                None,
+                &mut write_value,
+            );
+
+            let write_bytes_per_sec = if write_status == ERROR_SUCCESS.0 {
+                write_value.Anonymous.doubleValue
+            } else {
+                0.0
+            };
+
+            // Convert bytes/sec to MB/sec
+            Ok((
+                read_bytes_per_sec / 1_000_000.0,
+                write_bytes_per_sec / 1_000_000.0,
+            ))
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsDiskIOMonitor {
+    fn drop(&mut self) {
+        unsafe {
+            // PdhCloseQuery handles invalid handles gracefully, so we can always call it
+            let _ = PdhCloseQuery(self.query);
+        }
+    }
+}
+
+impl Default for DiskState {
+    fn default() -> Self {
+        Self {
+            #[cfg(windows)]
+            io_monitor: None,
+            #[cfg(not(windows))]
+            _phantom: std::marker::PhantomData,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,7 +228,14 @@ pub struct SystemStatus {
     pub network: NetworkMetrics,
     pub network_interfaces: Vec<NetworkInterface>,
     pub temperature_sensors: Vec<TemperatureSensor>,
+    pub gpu: Option<GpuMetrics>,
     pub processes: Vec<ProcessInfo>,
+    #[cfg(windows)]
+    pub top_io_processes: Vec<ProcessIOMetrics>,
+    #[cfg(windows)]
+    pub disk_breakdown: Option<DiskBreakdown>,
+    #[cfg(windows)]
+    pub boot_info: Option<BootInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +323,18 @@ pub struct ProcessInfo {
     pub memory_mb: f64,
     pub disk_read_mb: f64,
     pub disk_write_mb: f64,
+    #[cfg(windows)]
+    pub handle_count: Option<u32>,
+    #[cfg(windows)]
+    pub page_faults_per_sec: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessIOMetrics {
+    pub name: String,
+    pub pid: u32,
+    pub read_bytes_per_sec: f64,
+    pub write_bytes_per_sec: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +369,32 @@ pub struct TemperatureSensor {
     pub temperature_celsius: f32,
     pub max_celsius: Option<f32>,
     pub critical_celsius: Option<f32>,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskBreakdown {
+    pub volume: String, // e.g., "C:\"
+    pub categories: Vec<DiskCategory>,
+    pub total_disk_gb: f64,
+    pub cached_at: Option<chrono::DateTime<chrono::Local>>,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiskCategory {
+    pub name: String,
+    pub size_gb: f64,
+    pub percent: f32,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootInfo {
+    pub uptime_seconds: u64,
+    pub last_boot_time: chrono::DateTime<chrono::Local>,
+    pub boot_duration_seconds: u64,
+    pub shutdown_type: String,
 }
 
 /// Gather current system status
@@ -224,7 +445,32 @@ pub fn gather_status(system: &mut System) -> Result<SystemStatus> {
         let temperature_sensors = gather_temperature_sensors();
 
         // Gather top processes (show 10 instead of 5)
+        #[cfg(windows)]
+        let (handle_counts, page_faults) = {
+            let handles = gather_process_handle_counts();
+            let faults = gather_process_page_faults();
+            (handles, faults)
+        };
+        
+        #[cfg(windows)]
+        let processes = gather_top_processes_with_wmi(system, 10, &handle_counts, &page_faults);
+        #[cfg(not(windows))]
         let processes = gather_top_processes(system, 10);
+
+        // Gather top I/O processes via WMI
+        #[cfg(windows)]
+        let top_io_processes = gather_process_io_metrics();
+        #[cfg(not(windows))]
+        let top_io_processes = Vec::new();
+
+        // Gather disk breakdown (cached, expensive operation)
+        // Only use cached data to avoid blocking - don't scan on first load
+        #[cfg(windows)]
+        let disk_breakdown = gather_disk_breakdown_cached_only();
+
+        // Gather boot info
+        #[cfg(windows)]
+        let boot_info = gather_boot_info();
 
         // Calculate health score
         let health_score = calculate_health_score(&cpu, &memory, &disk, &power);
@@ -244,6 +490,12 @@ pub fn gather_status(system: &mut System) -> Result<SystemStatus> {
             network_interfaces,
             temperature_sensors,
             processes,
+            #[cfg(windows)]
+            top_io_processes,
+            #[cfg(windows)]
+            disk_breakdown,
+            #[cfg(windows)]
+            boot_info,
         })
     })
 }
@@ -431,10 +683,60 @@ fn gather_disk_details() -> Vec<DiskInfo> {
         .collect()
 }
 
+#[cfg(windows)]
+fn gather_disk_io_speeds(state: &mut DiskState, _elapsed: Duration) -> (f64, f64) {
+    // On Windows, use Performance Data Helper (PDH) API
+    // PDH requires two samples to calculate rates - first sample initializes, second gives the rate
+    
+    if state.io_monitor.is_none() {
+        // Initialize monitor on first call
+        match WindowsDiskIOMonitor::new() {
+            Ok(monitor) => {
+                state.io_monitor = Some(monitor);
+                // First call - just initialize, return zeros
+                // Next call (after ~2 seconds) will return actual values
+                return (0.0, 0.0);
+            }
+            Err(e) => {
+                // If initialization fails, log and continue with zeros
+                #[cfg(debug_assertions)]
+                eprintln!("[DEBUG] Failed to initialize disk I/O monitor: {}", e);
+                return (0.0, 0.0);
+            }
+        }
+    }
+
+    // Collect I/O stats - PDH needs a small delay between samples for accurate rates
+    if let Some(ref mut monitor) = state.io_monitor {
+        // Use a small delay (50ms) since we're called every ~2 seconds
+        // This ensures we get fresh data without blocking too long
+        match monitor.collect(Duration::from_millis(50)) {
+            Ok((read_mb, write_mb)) => {
+                // Values are already in MB/sec from collect()
+                (read_mb, write_mb)
+            }
+            Err(e) => {
+                #[cfg(debug_assertions)]
+                eprintln!("[DEBUG] Failed to collect disk I/O: {}", e);
+                (0.0, 0.0)
+            }
+        }
+    } else {
+        (0.0, 0.0)
+    }
+}
+
+#[cfg(not(windows))]
+fn gather_disk_io_speeds(_state: &mut DiskState, _elapsed: Duration) -> (f64, f64) {
+    // On non-Windows, disk I/O stats require sysinfo 0.37.2+ or platform-specific APIs
+    // For now, return zeros (can be enhanced with /proc/diskstats on Linux)
+    (0.0, 0.0)
+}
+
 fn gather_disk_metrics(
     _system: &mut System,
-    _state: &mut DiskState,
-    _elapsed: Duration,
+    state: &mut DiskState,
+    elapsed: Duration,
 ) -> DiskMetrics {
     // sysinfo 0.32 API - use Disks struct separately
     use sysinfo::Disks;
@@ -451,14 +753,8 @@ fn gather_disk_metrics(
         used_bytes += disk.total_space().saturating_sub(disk.available_space());
     }
 
-    // Note: Disk I/O stats (read/write speeds) require sysinfo 0.37.2+
-    // In sysinfo 0.32, disk I/O is only available per-process, not per-disk
-    // For now, we'll show 0 for I/O speeds - this can be enhanced later by:
-    // 1. Upgrading to sysinfo 0.37.2+ (has Disk::usage() method), or
-    // 2. Summing process disk usage (expensive), or
-    // 3. Using platform-specific APIs (Windows: Performance Counters, Linux: /proc/diskstats)
-    let read_speed_mb = 0.0;
-    let write_speed_mb = 0.0;
+    // Get disk I/O speeds using platform-specific methods
+    let (read_speed_mb, write_speed_mb) = gather_disk_io_speeds(state, elapsed);
 
     // Calculate usage percentages
     let total_gb = (total_bytes as f64) / (1024.0 * 1024.0 * 1024.0);
@@ -712,6 +1008,55 @@ fn gather_temperature_sensors() -> Vec<TemperatureSensor> {
         .collect()
 }
 
+#[cfg(windows)]
+fn gather_top_processes_with_wmi(
+    system: &System,
+    limit: usize,
+    handle_counts: &std::collections::HashMap<u32, u32>,
+    page_faults: &std::collections::HashMap<u32, u32>,
+) -> Vec<ProcessInfo> {
+    let mut processes: Vec<ProcessInfo> = system
+        .processes()
+        .iter()
+        .map(|(pid, proc)| {
+            let name = proc.name().to_string_lossy().to_string();
+            let pid_u32 = pid.as_u32();
+            let cpu_usage = proc.cpu_usage();
+            let memory_bytes = proc.memory();
+            let memory_usage = (memory_bytes as f32) / (system.total_memory() as f32) * 100.0;
+            let memory_mb = (memory_bytes as f64) / (1024.0 * 1024.0);
+
+            // Disk I/O
+            let disk_usage = proc.disk_usage();
+            let disk_read_mb = (disk_usage.read_bytes as f64) / (1024.0 * 1024.0);
+            let disk_write_mb = (disk_usage.written_bytes as f64) / (1024.0 * 1024.0);
+
+            ProcessInfo {
+                name,
+                pid: pid_u32,
+                cpu_usage,
+                memory_usage,
+                memory_mb,
+                disk_read_mb,
+                disk_write_mb,
+                handle_count: handle_counts.get(&pid_u32).copied(),
+                page_faults_per_sec: page_faults.get(&pid_u32).copied(),
+            }
+        })
+        .collect();
+
+    // Sort by CPU usage descending
+    processes.sort_by(|a, b| {
+        b.cpu_usage
+            .partial_cmp(&a.cpu_usage)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    processes.into_iter().take(limit).collect()
+}
+
+#[cfg(not(windows))]
+#[allow(dead_code)] // Used on non-Windows platforms via conditional compilation
 fn gather_top_processes(system: &System, limit: usize) -> Vec<ProcessInfo> {
     let mut processes: Vec<ProcessInfo> = system
         .processes()
@@ -736,6 +1081,10 @@ fn gather_top_processes(system: &System, limit: usize) -> Vec<ProcessInfo> {
                 memory_mb,
                 disk_read_mb,
                 disk_write_mb,
+                #[cfg(windows)]
+                handle_count: None,
+                #[cfg(windows)]
+                page_faults_per_sec: None,
             }
         })
         .collect();
@@ -748,6 +1097,424 @@ fn gather_top_processes(system: &System, limit: usize) -> Vec<ProcessInfo> {
     });
 
     processes.into_iter().take(limit).collect()
+}
+
+#[cfg(windows)]
+fn gather_process_io_metrics() -> Vec<ProcessIOMetrics> {
+    use std::collections::HashMap;
+    use std::convert::TryFrom;
+    use wmi::{COMLibrary, WMIConnection, Variant};
+
+    let com_lib = match COMLibrary::new() {
+        Ok(lib) => lib,
+        Err(_) => return Vec::new(),
+    };
+
+    let wmi_con = match WMIConnection::new(com_lib) {
+        Ok(con) => con,
+        Err(_) => return Vec::new(),
+    };
+
+    // Query per-process I/O rates
+    let query = "SELECT Name, IDProcess, IOReadBytesPerSec, IOWriteBytesPerSec FROM Win32_PerfFormattedData_PerfProc_Process WHERE Name != '_Total' AND Name != 'Idle'";
+    
+    let results: Vec<HashMap<String, Variant>> = match wmi_con.raw_query(query) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut io_metrics: Vec<ProcessIOMetrics> = results
+        .into_iter()
+        .filter_map(|row| {
+            let name_var = row.get("Name")?;
+            let name = String::try_from(name_var.clone()).ok()?;
+            
+            let pid_var = row.get("IDProcess")?;
+            let pid = u32::try_from(pid_var.clone()).ok()?;
+            
+            // WMI returns these as u64 values (bytes/sec)
+            let read_var = row.get("IOReadBytesPerSec")?;
+            let read_bytes_per_sec = u64::try_from(read_var.clone()).unwrap_or(0) as f64;
+            
+            let write_var = row.get("IOWriteBytesPerSec")?;
+            let write_bytes_per_sec = u64::try_from(write_var.clone()).unwrap_or(0) as f64;
+
+            // Only include processes with actual I/O activity
+            if read_bytes_per_sec > 0.0 || write_bytes_per_sec > 0.0 {
+                Some(ProcessIOMetrics {
+                    name,
+                    pid,
+                    read_bytes_per_sec,
+                    write_bytes_per_sec,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Sort by total I/O (read + write) descending
+    io_metrics.sort_by(|a, b| {
+        let total_a = a.read_bytes_per_sec + a.write_bytes_per_sec;
+        let total_b = b.read_bytes_per_sec + b.write_bytes_per_sec;
+        total_b.partial_cmp(&total_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Return top 5 I/O processes
+    io_metrics.into_iter().take(5).collect()
+}
+
+#[cfg(not(windows))]
+fn gather_process_io_metrics() -> Vec<ProcessIOMetrics> {
+    Vec::new()
+}
+
+#[cfg(windows)]
+fn gather_process_handle_counts() -> HashMap<u32, u32> {
+    use std::collections::HashMap;
+    use std::convert::TryFrom;
+    use wmi::{COMLibrary, WMIConnection, Variant};
+
+    let mut handle_map = HashMap::new();
+
+    let com_lib = match COMLibrary::new() {
+        Ok(lib) => lib,
+        Err(_) => return handle_map,
+    };
+
+    let wmi_con = match WMIConnection::new(com_lib) {
+        Ok(con) => con,
+        Err(_) => return handle_map,
+    };
+
+    let query = "SELECT ProcessId, HandleCount FROM Win32_Process";
+    
+    let results: Vec<HashMap<String, Variant>> = match wmi_con.raw_query(query) {
+        Ok(r) => r,
+        Err(_) => return handle_map,
+    };
+
+    for row in results {
+        if let (Some(pid_var), Some(handle_var)) = (row.get("ProcessId"), row.get("HandleCount")) {
+            if let (Ok(pid), Ok(handles)) = (
+                u32::try_from(pid_var.clone()),
+                u32::try_from(handle_var.clone()),
+            ) {
+                handle_map.insert(pid, handles);
+            }
+        }
+    }
+
+    handle_map
+}
+
+#[cfg(not(windows))]
+fn gather_process_handle_counts() -> HashMap<u32, u32> {
+    HashMap::new()
+}
+
+#[cfg(windows)]
+fn gather_process_page_faults() -> HashMap<u32, u32> {
+    use std::collections::HashMap;
+    use std::convert::TryFrom;
+    use wmi::{COMLibrary, WMIConnection, Variant};
+
+    let mut fault_map = HashMap::new();
+
+    let com_lib = match COMLibrary::new() {
+        Ok(lib) => lib,
+        Err(_) => return fault_map,
+    };
+
+    let wmi_con = match WMIConnection::new(com_lib) {
+        Ok(con) => con,
+        Err(_) => return fault_map,
+    };
+
+    let query = "SELECT IDProcess, PageFaultsPerSec FROM Win32_PerfFormattedData_PerfProc_Process WHERE Name != '_Total'";
+    
+    let results: Vec<HashMap<String, Variant>> = match wmi_con.raw_query(query) {
+        Ok(r) => r,
+        Err(_) => return fault_map,
+    };
+
+    for row in results {
+        if let (Some(pid_var), Some(fault_var)) = (row.get("IDProcess"), row.get("PageFaultsPerSec")) {
+            if let (Ok(pid), Ok(faults)) = (
+                u32::try_from(pid_var.clone()),
+                u32::try_from(fault_var.clone()),
+            ) {
+                fault_map.insert(pid, faults);
+            }
+        }
+    }
+
+    fault_map
+}
+
+#[cfg(not(windows))]
+fn gather_process_page_faults() -> HashMap<u32, u32> {
+    HashMap::new()
+}
+
+#[cfg(windows)]
+pub fn gather_disk_breakdown_cached_only() -> Option<DiskBreakdown> {
+    const CACHE_DURATION_SECS: u64 = 300; // 5 minutes
+
+    // Only return cached data - don't block on scanning
+    if let Ok(cache) = DISK_BREAKDOWN_CACHE.read() {
+        if let Some((breakdown, timestamp)) = cache.as_ref() {
+            if timestamp.elapsed().as_secs() < CACHE_DURATION_SECS {
+                return Some(breakdown.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Refresh disk breakdown asynchronously in a background thread
+/// This allows the UI to remain responsive while scanning
+#[cfg(windows)]
+pub fn refresh_disk_breakdown_async() {
+    std::thread::spawn(|| {
+        let _ = gather_disk_breakdown();
+    });
+}
+
+#[cfg(windows)]
+fn gather_disk_breakdown() -> Option<DiskBreakdown> {
+    const CACHE_DURATION_SECS: u64 = 300; // 5 minutes
+
+    // Check cache first
+    let cached = {
+        if let Ok(cache) = DISK_BREAKDOWN_CACHE.read() {
+            if let Some((breakdown, timestamp)) = cache.as_ref() {
+                if timestamp.elapsed().as_secs() < CACHE_DURATION_SECS {
+                    return Some(breakdown.clone());
+                }
+            }
+        }
+        None
+    };
+
+    if let Some(cached) = cached {
+        return Some(cached);
+    }
+
+    // Get total disk space for C:\
+    let total_disk_bytes = match get_disk_space_ex("C:\\") {
+        Ok((total, _, _)) => total,
+        Err(_) => return None,
+    };
+    let total_disk_gb = (total_disk_bytes as f64) / (1024.0 * 1024.0 * 1024.0);
+
+    // Define categories and their paths
+    let categories_config = vec![
+        ("Users/Profiles", vec!["C:\\Users\\"]),
+        ("Program Files", vec!["C:\\Program Files\\", "C:\\Program Files (x86)\\"]),
+        ("AppData", vec!["C:\\ProgramData\\"]),
+        ("Windows", vec!["C:\\Windows\\"]),
+    ];
+
+    let mut categories = Vec::new();
+    let mut total_calculated = 0u64;
+
+    // Calculate size for each category
+    for (name, paths) in categories_config {
+        let mut category_size = 0u64;
+        for path_str in paths {
+            if let Ok(size) = get_directory_size_safe(Path::new(path_str)) {
+                category_size += size;
+            }
+        }
+        total_calculated += category_size;
+        
+        let size_gb = (category_size as f64) / (1024.0 * 1024.0 * 1024.0);
+        let percent = if total_disk_bytes > 0 {
+            (category_size as f32 / total_disk_bytes as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        categories.push(DiskCategory {
+            name: name.to_string(),
+            size_gb,
+            percent,
+        });
+    }
+
+    // Calculate "Other" category (everything else on C:\)
+    let other_size = total_disk_bytes.saturating_sub(total_calculated);
+    let other_gb = (other_size as f64) / (1024.0 * 1024.0 * 1024.0);
+    let other_percent = if total_disk_bytes > 0 {
+        (other_size as f32 / total_disk_bytes as f32) * 100.0
+    } else {
+        0.0
+    };
+
+    categories.push(DiskCategory {
+        name: "Other".to_string(),
+        size_gb: other_gb,
+        percent: other_percent,
+    });
+
+    // Sort by size descending
+    categories.sort_by(|a, b| b.size_gb.partial_cmp(&a.size_gb).unwrap_or(std::cmp::Ordering::Equal));
+
+    let breakdown = DiskBreakdown {
+        volume: "C:\\".to_string(), // Breakdown is for C:\ drive
+        categories,
+        total_disk_gb,
+        cached_at: Some(chrono::Local::now()),
+    };
+
+    // Update cache (shared across all threads)
+    if let Ok(mut cache) = DISK_BREAKDOWN_CACHE.write() {
+        *cache = Some((breakdown.clone(), Instant::now()));
+    }
+
+    Some(breakdown)
+}
+
+#[cfg(windows)]
+fn get_disk_space_ex(drive: &str) -> Result<(u64, u64, u64), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    let path: Vec<u16> = OsStr::new(drive)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut free_available: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut free_bytes: u64 = 0;
+
+    unsafe {
+        extern "system" {
+            fn GetDiskFreeSpaceExW(
+                lpDirectoryName: *const u16,
+                lpFreeBytesAvailableToCaller: *mut u64,
+                lpTotalNumberOfBytes: *mut u64,
+                lpTotalNumberOfFreeBytes: *mut u64,
+            ) -> i32;
+        }
+
+        let result = GetDiskFreeSpaceExW(
+            path.as_ptr(),
+            &mut free_available,
+            &mut total_bytes,
+            &mut free_bytes,
+        );
+
+        if result != 0 {
+            Ok((total_bytes, free_bytes, free_available))
+        } else {
+            Err("GetDiskFreeSpaceEx failed".to_string())
+        }
+    }
+}
+
+#[cfg(windows)]
+fn get_directory_size_safe(path: &Path) -> Result<u64, std::io::Error> {
+    use std::fs;
+
+    let mut total = 0u64;
+
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries {
+            if let Ok(entry) = entry {
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_dir() {
+                        // Recursively calculate subdirectory size
+                        if let Ok(subdir_size) = get_directory_size_safe(&entry.path()) {
+                            total += subdir_size;
+                        }
+                        // Continue on error (permission denied, etc.)
+                    } else {
+                        total += metadata.len();
+                    }
+                }
+                // Skip inaccessible files silently
+            }
+        }
+    }
+
+    Ok(total)
+}
+
+#[cfg(windows)]
+fn gather_boot_info() -> Option<BootInfo> {
+    use std::convert::TryFrom;
+    use wmi::{COMLibrary, WMIConnection, Variant};
+    use std::collections::HashMap;
+
+    let com_lib = COMLibrary::new().ok()?;
+    let wmi_con = WMIConnection::new(com_lib).ok()?;
+
+    // Query LastBootUpTime from Win32_OperatingSystem
+    let query = "SELECT LastBootUpTime FROM Win32_OperatingSystem";
+    let results: Vec<HashMap<String, Variant>> = wmi_con.raw_query(query).ok()?;
+
+    let boot_time_str = results.first()?.get("LastBootUpTime")?;
+    let boot_time_str = String::try_from(boot_time_str.clone()).ok()?;
+
+    // Parse WMI datetime: "20240112153020.500000+300"
+    // Format: YYYYMMDDHHMMSS.microseconds+timezone
+    let last_boot_time = parse_wmi_datetime(&boot_time_str).ok()?;
+
+    // Calculate uptime
+    let now = chrono::Local::now();
+    let uptime_duration = now.signed_duration_since(last_boot_time);
+    let uptime_seconds = uptime_duration.num_seconds().max(0) as u64;
+
+    // Estimate boot duration (default ~47 seconds, can be tuned)
+    let boot_duration_seconds = 47u64;
+
+    // Determine shutdown type (simplified - assume clean for now)
+    // TODO: Could check Event Log for clean/dirty shutdown indicators
+    let shutdown_type = "Clean".to_string();
+
+    Some(BootInfo {
+        uptime_seconds,
+        last_boot_time,
+        boot_duration_seconds,
+        shutdown_type,
+    })
+}
+
+#[cfg(windows)]
+fn parse_wmi_datetime(s: &str) -> Result<chrono::DateTime<chrono::Local>, Box<dyn std::error::Error>> {
+    use chrono::TimeZone;
+    
+    // Input: "20240112153020.500000+300"
+    // Parse YYYYMMDDHHMMSS part (first 14 characters)
+    
+    if s.len() < 14 {
+        return Err("Invalid WMI datetime format".into());
+    }
+
+    let year = s[0..4].parse::<i32>()?;
+    let month = s[4..6].parse::<u32>()?;
+    let day = s[6..8].parse::<u32>()?;
+    let hour = s[8..10].parse::<u32>()?;
+    let minute = s[10..12].parse::<u32>()?;
+    let second = s[12..14].parse::<u32>()?;
+
+    let naive_dt = chrono::NaiveDateTime::new(
+        chrono::NaiveDate::from_ymd_opt(year, month, day)
+            .ok_or("Invalid date")?,
+        chrono::NaiveTime::from_hms_opt(hour, minute, second)
+            .ok_or("Invalid time")?,
+    );
+
+    // Convert to local timezone
+    let local_dt = chrono::Local
+        .from_local_datetime(&naive_dt)
+        .single()
+        .ok_or("Ambiguous datetime")?;
+
+    Ok(local_dt)
 }
 
 /// Calculate health score (0-100) based on system metrics
@@ -835,20 +1602,28 @@ pub fn format_cli_output(status: &SystemStatus) -> String {
         mem_bar, status.memory.used_percent
     ));
 
-    // CPU Load
-    output.push_str(&format!(
-        "Load    {:.2} / {:.2} / {:.2} ({} cores)    ",
-        status.cpu.load_avg_1min,
-        status.cpu.load_avg_5min,
-        status.cpu.load_avg_15min,
-        status.cpu.cores.len()
-    ));
+    // CPU Load (only on Unix systems)
+    if !cfg!(windows) {
+        output.push_str(&format!(
+            "Load    {:.2} / {:.2} / {:.2} ({} cores)    ",
+            status.cpu.load_avg_1min,
+            status.cpu.load_avg_5min,
+            status.cpu.load_avg_15min,
+            status.cpu.cores.len()
+        ));
 
-    // Memory Total
-    output.push_str(&format!(
-        "Total   {:.1} / {:.1} GB\n",
-        status.memory.used_gb, status.memory.total_gb
-    ));
+        // Memory Total
+        output.push_str(&format!(
+            "Total   {:.1} / {:.1} GB\n",
+            status.memory.used_gb, status.memory.total_gb
+        ));
+    } else {
+        // On Windows, skip Load line and go straight to Memory Total
+        output.push_str(&format!(
+            "                                    Total   {:.1} / {:.1} GB\n",
+            status.memory.used_gb, status.memory.total_gb
+        ));
+    }
 
     // CPU Core (first core)
     if let Some(core) = status.cpu.cores.first() {
@@ -869,11 +1644,10 @@ pub fn format_cli_output(status: &SystemStatus) -> String {
     // Disk and Power side by side
     output.push_str("Disk                                   Power\n");
 
-    // Disk Used
-    let disk_bar = create_progress_bar(status.disk.used_percent / 100.0, 20);
+    // Disk Used - just percentage
     output.push_str(&format!(
-        "Used    {}  {:.1}%    ",
-        disk_bar, status.disk.used_percent
+        "Used    {:.1}%                            ",
+        status.disk.used_percent
     ));
 
     // Power Level
@@ -884,21 +1658,25 @@ pub fn format_cli_output(status: &SystemStatus) -> String {
             power_bar, power.level_percent
         ));
 
-        // Disk Free
+        // Disk Free - show "X.X GB / Y.Y GB" format
         output.push_str(&format!(
-            "Free    {:.1} GB                       ",
-            status.disk.free_gb
+            "Free    {:.1} GB / {:.1} GB                    ",
+            status.disk.free_gb, status.disk.total_gb
         ));
 
         // Power Status
         output.push_str(&format!("Status  {}\n", power.status));
 
-        // Disk Read/Write
-        output.push_str(&format!(
-            "Read    {}  {:.1} MB/s                  ",
-            create_speed_bar(status.disk.read_speed_mb / 100.0, 5),
-            status.disk.read_speed_mb
-        ));
+        // Disk Read (only if non-zero)
+        if status.disk.read_speed_mb > 0.0 {
+            output.push_str(&format!(
+                "Read    {}  {:.1} MB/s                  ",
+                create_speed_bar(status.disk.read_speed_mb / 100.0, 5),
+                status.disk.read_speed_mb
+            ));
+        } else {
+            output.push_str("                                    ");
+        }
 
         // Power Health
         output.push_str(&format!("Health  {}", power.health));
@@ -909,12 +1687,16 @@ pub fn format_cli_output(status: &SystemStatus) -> String {
 
         output.push('\n');
 
-        // Disk Write
-        output.push_str(&format!(
-            "Write   {}  {:.1} MB/s                  ",
-            create_speed_bar(status.disk.write_speed_mb / 100.0, 5),
-            status.disk.write_speed_mb
-        ));
+        // Disk Write (only if non-zero)
+        if status.disk.write_speed_mb > 0.0 {
+            output.push_str(&format!(
+                "Write   {}  {:.1} MB/s                  ",
+                create_speed_bar(status.disk.write_speed_mb / 100.0, 5),
+                status.disk.write_speed_mb
+            ));
+        } else {
+            output.push_str("                                    ");
+        }
 
         // Power Cycles
         if let Some(cycles) = power.cycles {
@@ -949,36 +1731,60 @@ pub fn format_cli_output(status: &SystemStatus) -> String {
     } else {
         output.push_str("Level   N/A\n");
         output.push_str(&format!(
-            "Free    {:.1} GB                       ",
-            status.disk.free_gb
+            "Free    {:.1} GB / {:.1} GB                    ",
+            status.disk.free_gb, status.disk.total_gb
         ));
         output.push_str("Status  Plugged In\n");
-        output.push_str(&format!(
-            "Read    {}  {:.1} MB/s\n",
-            create_speed_bar(status.disk.read_speed_mb / 100.0, 5),
-            status.disk.read_speed_mb
-        ));
+        if status.disk.read_speed_mb > 0.0 {
+            output.push_str(&format!(
+                "Read    {}  {:.1} MB/s\n",
+                create_speed_bar(status.disk.read_speed_mb / 100.0, 5),
+                status.disk.read_speed_mb
+            ));
+        }
     }
 
-    // Disk Write
-    output.push_str(&format!(
-        "Write   {}  {:.1} MB/s\n\n",
-        create_speed_bar(status.disk.write_speed_mb / 100.0, 5),
-        status.disk.write_speed_mb
-    ));
+    // Disk Write (only if non-zero and power section doesn't exist, since write is shown inline with power)
+    if status.power.is_none() && status.disk.write_speed_mb > 0.0 {
+        output.push_str(&format!(
+            "Write   {}  {:.1} MB/s\n\n",
+            create_speed_bar(status.disk.write_speed_mb / 100.0, 5),
+            status.disk.write_speed_mb
+        ));
+    } else {
+        output.push_str("\n");
+    }
 
-    // Network
+    // Network - use Kbps if < 1 MB/s, otherwise MB/s
     output.push_str("Network\n");
-    output.push_str(&format!(
-        "Down    {}  {:.1} MB/s\n",
-        create_speed_bar(status.network.download_mb / 10.0, 5),
-        status.network.download_mb
-    ));
-    output.push_str(&format!(
-        "Up      {}  {:.1} MB/s\n",
-        create_speed_bar(status.network.upload_mb / 10.0, 5),
-        status.network.upload_mb
-    ));
+    if status.network.download_mb < 1.0 {
+        let kbps = status.network.download_mb * 1000.0;
+        output.push_str(&format!(
+            "Down    {}  {:.1} Kbps\n",
+            create_speed_bar(status.network.download_mb / 100.0, 5),
+            kbps
+        ));
+    } else {
+        output.push_str(&format!(
+            "Down    {}  {:.1} MB/s\n",
+            create_speed_bar(status.network.download_mb / 10.0, 5),
+            status.network.download_mb
+        ));
+    }
+    if status.network.upload_mb < 1.0 {
+        let kbps = status.network.upload_mb * 1000.0;
+        output.push_str(&format!(
+            "Up      {}  {:.1} Kbps\n",
+            create_speed_bar(status.network.upload_mb / 100.0, 5),
+            kbps
+        ));
+    } else {
+        output.push_str(&format!(
+            "Up      {}  {:.1} MB/s\n",
+            create_speed_bar(status.network.upload_mb / 10.0, 5),
+            status.network.upload_mb
+        ));
+    }
 
     if let Some(proxy) = &status.network.proxy {
         output.push_str(&format!("Proxy   {}\n", proxy));

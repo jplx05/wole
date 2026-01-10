@@ -15,6 +15,46 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
+use std::time::SystemTime;
+
+fn truncate_end(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let len = s.chars().count();
+    if len <= max_chars {
+        return s.to_string();
+    }
+    if max_chars <= 3 {
+        return "...".chars().take(max_chars).collect();
+    }
+    let take = max_chars.saturating_sub(3);
+    format!("{}...", s.chars().take(take).collect::<String>())
+}
+
+fn format_ago(t: Option<SystemTime>) -> String {
+    let Some(t) = t else {
+        return "--".to_string();
+    };
+    let Ok(elapsed) = t.elapsed() else {
+        return "--".to_string();
+    };
+    let secs = elapsed.as_secs();
+    // Always show at least "1m ago" for recent/active apps (no seconds)
+    if secs < 60 {
+        "1m ago".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else if secs < 86400 * 14 {
+        format!("{}d ago", secs / 86400)
+    } else if secs < 86400 * 365 {
+        format!("{}w ago", secs / (86400 * 7))
+    } else {
+        format!("{}y ago", secs / (86400 * 365))
+    }
+}
 
 /// Disk space information
 #[derive(Debug, Clone, Copy)]
@@ -110,7 +150,7 @@ pub fn render(f: &mut Frame, app_state: &mut AppState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(LOGO_WITH_TAGLINE_HEIGHT), // Logo + 2 blank lines + tagline
-            Constraint::Length(5),                        // Summary (increased for extra info)
+            Constraint::Length(5),                        // Summary
             Constraint::Length(3),                        // Search bar (always visible)
             Constraint::Min(10),                          // Grouped results
             Constraint::Length(3),                        // Shortcuts
@@ -264,54 +304,87 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
     // If rows is empty but we have category groups, something went wrong
     // Try to show items directly as a fallback - show ALL categories
     if rows.is_empty() && !app_state.category_groups.is_empty() {
-        // Fallback: show items directly from all category groups
-        for (group_idx, group) in app_state.category_groups.iter().enumerate() {
-            let item_indices = app_state.category_item_indices(group_idx);
-            if !item_indices.is_empty() {
-                // Show category name as header
-                if app_state.category_groups.len() > 1 {
-                    lines.push(Line::from(vec![Span::styled(
-                        format!("  {} ({} items)", group.name, item_indices.len()),
-                        Styles::emphasis(),
-                    )]));
-                }
-                // Show items directly without folder grouping
-                for &item_idx in &item_indices {
-                    let Some(item) = app_state.all_items.get(item_idx) else {
-                        continue;
-                    };
-                    let is_selected = app_state.selected_items.contains(&item_idx);
-                    let checkbox = if is_selected { "[X]" } else { "[ ]" };
-                    let checkbox_style = if is_selected {
-                        Styles::checked()
-                    } else {
-                        Styles::secondary()
-                    };
-                    let path_str = crate::utils::to_relative_path(&item.path, &app_state.scan_path);
-                    let size_str = bytesize::to_string(item.size_bytes, true);
-                    let indent = if app_state.category_groups.len() > 1 {
-                        "    "
-                    } else {
-                        "  "
-                    };
-                    lines.push(Line::from(vec![
-                        Span::styled(indent, Style::default()),
-                        Span::styled(checkbox, checkbox_style),
-                        Span::styled(" ", Style::default()),
-                        Span::styled(path_str, Styles::primary()),
-                        Span::styled(format!("  {:>8}", size_str), Styles::secondary()),
-                    ]));
-                }
-                if app_state.category_groups.len() > 1
-                    && group_idx < app_state.category_groups.len() - 1
-                {
-                    lines.push(Line::from(""));
+        if app_state.search_query.is_empty() {
+            // Fallback: show items directly from all category groups
+            for (group_idx, group) in app_state.category_groups.iter().enumerate() {
+                let item_indices = app_state.category_item_indices(group_idx);
+                if !item_indices.is_empty() {
+                    // Show category name as header
+                    if app_state.category_groups.len() > 1 {
+                        lines.push(Line::from(vec![Span::styled(
+                            format!("  {} ({} items)", group.name, item_indices.len()),
+                            Styles::emphasis(),
+                        )]));
+                    }
+                    // Show items directly without folder grouping
+                    for &item_idx in &item_indices {
+                        let Some(item) = app_state.all_items.get(item_idx) else {
+                            continue;
+                        };
+                        let is_selected = app_state.selected_items.contains(&item_idx);
+                        let checkbox = if is_selected { "[X]" } else { "[ ]" };
+                        let checkbox_style = if is_selected {
+                            Styles::checked()
+                        } else {
+                            Styles::secondary()
+                        };
+                        // For applications, use display name from the registry map.
+                        // Fallbacks are only for rare cases where lookup fails.
+                        let display_str = if item.category == "Installed Applications" {
+                            item.display_name
+                                .clone()
+                                .or_else(|| {
+                                    item.path
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .map(|s| s.to_string())
+                                })
+                                .unwrap_or_else(|| {
+                                    crate::utils::to_relative_path(&item.path, &app_state.scan_path)
+                                })
+                        } else {
+                            crate::utils::to_relative_path(&item.path, &app_state.scan_path)
+                        };
+                        let size_str = bytesize::to_string(item.size_bytes, true);
+                        let ago_str = if item.category == "Installed Applications" {
+                            Some(format_ago(item.last_opened))
+                        } else {
+                            None
+                        };
+                        let indent = if app_state.category_groups.len() > 1 {
+                            "    "
+                        } else {
+                            "  "
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled(indent, Style::default()),
+                            Span::styled(checkbox, checkbox_style),
+                            Span::styled(" ", Style::default()),
+                            Span::styled(display_str, Styles::primary()),
+                            Span::styled(format!("  {:>8}", size_str), Styles::secondary()),
+                            if let Some(ago) = ago_str {
+                                Span::styled(format!(" | {:>8}", ago), Styles::secondary())
+                            } else {
+                                Span::raw("")
+                            },
+                        ]));
+                    }
+                    if app_state.category_groups.len() > 1
+                        && group_idx < app_state.category_groups.len() - 1
+                    {
+                        lines.push(Line::from(""));
+                    }
                 }
             }
-        }
-        if lines.is_empty() {
+            if lines.is_empty() {
+                lines.push(Line::from(vec![Span::styled(
+                    "  No items to display",
+                    Styles::secondary(),
+                )]));
+            }
+        } else {
             lines.push(Line::from(vec![Span::styled(
-                "  No items to display",
+                "  No matches found",
                 Styles::secondary(),
             )]));
         }
@@ -327,16 +400,13 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
         }
     }
 
-    enum Context {
-        None,
-        FlatItems,
-        FolderItems,
-    }
-    let mut ctx = Context::None;
-    let mut current_folder_path: Option<String> = None; // Track current folder path to strip from items
+    // Track the current folder path at each nesting depth so items can be displayed
+    // relative to their parent folder (tree-style).
+    let mut folder_stack: Vec<String> = Vec::new();
 
     // When there's only one category, skip category header and adjust indentation
     let skip_category_header = app_state.category_groups.len() == 1;
+    let base_indent = if skip_category_header { "" } else { "    " };
 
     for (row_idx, row) in rows.iter().enumerate() {
         let is_cursor = row_idx == app_state.cursor;
@@ -364,13 +434,7 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                 let Some(group) = app_state.category_groups.get(group_idx) else {
                     continue;
                 };
-
-                ctx = if group.grouped_by_folder {
-                    Context::None
-                } else {
-                    Context::FlatItems
-                };
-                current_folder_path = None; // Clear folder path when leaving folder context
+                folder_stack.clear();
 
                 let icon = if group.safe { "✓" } else { "!" };
                 let icon_style = category_style(group.safe);
@@ -383,7 +447,11 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                 let total_in_group = item_indices.len();
 
                 let (checkbox, checkbox_style) = tri_checkbox(selected_in_group, total_in_group);
-                let exp_marker = if group.expanded { "▾" } else { "▸" };
+                let exp_marker = if group.expanded || !app_state.search_query.is_empty() {
+                    "▾"
+                } else {
+                    "▸"
+                };
 
                 let header_line = Line::from(vec![
                     Span::styled(format!(" {} ", prefix), row_style),
@@ -411,6 +479,7 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
             crate::tui::state::ResultsRow::FolderHeader {
                 group_idx,
                 folder_idx,
+                depth,
             } => {
                 let Some(group) = app_state.category_groups.get(group_idx) else {
                     continue;
@@ -418,15 +487,21 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                 let Some(folder) = group.folder_groups.get(folder_idx) else {
                     continue;
                 };
+                // Capture parent folder key BEFORE we update the stack.
+                let parent_key = if depth > 0 {
+                    folder_stack.get(depth - 1).cloned()
+                } else {
+                    None
+                };
 
-                ctx = Context::FolderItems;
-
-                // Store the folder path (relative) to strip from child items
+                // Update folder stack for stripping item prefixes.
                 let folder_path = std::path::PathBuf::from(&folder.folder_name);
-                current_folder_path = Some(crate::utils::to_relative_path(
-                    &folder_path,
-                    &app_state.scan_path,
-                ));
+                let folder_key = crate::utils::to_relative_path(&folder_path, &app_state.scan_path);
+                if folder_stack.len() <= depth {
+                    folder_stack.resize(depth + 1, String::new());
+                }
+                folder_stack[depth] = folder_key;
+                folder_stack.truncate(depth + 1);
 
                 let selected_in_folder = folder
                     .items
@@ -435,26 +510,37 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                     .count();
                 let total_in_folder = folder.items.len();
                 let (checkbox, checkbox_style) = tri_checkbox(selected_in_folder, total_in_folder);
-                let exp_marker = if folder.expanded { "▾" } else { "▸" };
+                let exp_marker = if folder.expanded || !app_state.search_query.is_empty() {
+                    "▾"
+                } else {
+                    "▸"
+                };
 
                 // Truncate folder path to avoid line wrapping.
                 // Convert folder_name (which may be absolute) to relative path
                 let folder_path = std::path::PathBuf::from(&folder.folder_name);
-                let folder_str = crate::utils::to_relative_path(&folder_path, &app_state.scan_path);
+                let mut folder_str =
+                    crate::utils::to_relative_path(&folder_path, &app_state.scan_path);
+
+                // If nested, show folder name relative to its parent folder.
+                if let Some(parent) = parent_key {
+                    if parent != "(root)" && !parent.is_empty() {
+                        let normalized_parent = parent.replace('\\', "/");
+                        let normalized_folder = folder_str.replace('\\', "/");
+                        if normalized_folder.starts_with(&normalized_parent) {
+                            let remaining = &normalized_folder[normalized_parent.len()..];
+                            folder_str =
+                                remaining.strip_prefix('/').unwrap_or(remaining).to_string();
+                        }
+                    }
+                }
                 let size_str = bytesize::to_string(folder.total_size, true);
 
-                // Adjust indent based on whether category header is shown
-                let indent = if skip_category_header { "" } else { "    " };
+                // Indent folder headers by nesting depth.
+                let indent = format!("{base_indent}{}", "  ".repeat(depth));
                 let fixed = indent.len() + 2 /*prefix*/ + 1 /*space*/ + 3 /*checkbox*/ + 1 /*space*/ + 2 /*exp*/ + 2 /*space*/ + 2 /*two spaces before size*/ + 8 + 2 /*two spaces before count*/ + 10;
                 let max_len = (inner.width as usize).saturating_sub(fixed).max(8);
-                let folder_display = if folder_str.len() > max_len {
-                    format!(
-                        "...{}",
-                        &folder_str[folder_str.len().saturating_sub(max_len.saturating_sub(3))..]
-                    )
-                } else {
-                    folder_str
-                };
+                let folder_display = truncate_end(&folder_str, max_len);
 
                 let folder_header = Line::from(vec![
                     Span::styled(format!("{}{} ", indent, prefix), row_style),
@@ -470,7 +556,7 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                 ]);
                 lines.push(folder_header);
             }
-            crate::tui::state::ResultsRow::Item { item_idx } => {
+            crate::tui::state::ResultsRow::Item { item_idx, depth } => {
                 let Some(item) = app_state.all_items.get(item_idx) else {
                     continue;
                 };
@@ -483,72 +569,73 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                     Styles::secondary()
                 };
 
-                // Adjust indent based on context and whether category header is shown
-                let indent = match ctx {
-                    Context::FolderItems => {
-                        if skip_category_header {
-                            "  "
-                        } else {
-                            "      "
+                // Indent items by their nesting depth.
+                let indent = format!("{base_indent}{}", "  ".repeat(depth));
+
+                // For applications, show the registry display name (fallback to filename/path).
+                let path_str = if item.category == "Installed Applications" {
+                    item.display_name
+                        .clone()
+                        .or_else(|| {
+                            item.path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|s| s.to_string())
+                        })
+                        .unwrap_or_else(|| {
+                            crate::utils::to_relative_path(&item.path, &app_state.scan_path)
+                        })
+                } else {
+                    // Truncate the path to avoid line wrapping.
+                    let mut pstr = crate::utils::to_relative_path(&item.path, &app_state.scan_path);
+
+                    // If we're nested under a folder header, strip the folder prefix from the path.
+                    if depth > 0 {
+                        if let Some(folder_path) = folder_stack.get(depth - 1) {
+                            if folder_path != "(root)" && !folder_path.is_empty() {
+                                // Normalize paths for comparison (handle both / and \)
+                                let normalized_folder = folder_path.replace('\\', "/");
+                                let normalized_path = pstr.replace('\\', "/");
+
+                                // Strip the folder path prefix from the item path
+                                if normalized_path.starts_with(&normalized_folder) {
+                                    // Remove the folder path and the following separator
+                                    let remaining = &normalized_path[normalized_folder.len()..];
+                                    pstr = if let Some(stripped) = remaining.strip_prefix('/') {
+                                        stripped.to_string()
+                                    } else if remaining.is_empty() {
+                                        // If the item path is exactly the folder path, show just the filename
+                                        item.path
+                                            .file_name()
+                                            .and_then(|n| n.to_str())
+                                            .map(|s| s.to_string())
+                                            .unwrap_or_else(|| remaining.to_string())
+                                    } else {
+                                        remaining.to_string()
+                                    };
+                                }
+                            }
                         }
                     }
-                    Context::FlatItems => {
-                        if skip_category_header {
-                            ""
-                        } else {
-                            "    "
-                        }
-                    }
-                    Context::None => {
-                        if skip_category_header {
-                            ""
-                        } else {
-                            "    "
-                        }
-                    }
+                    pstr
                 };
-
-                // Truncate the path to avoid line wrapping.
-                let mut path_str = crate::utils::to_relative_path(&item.path, &app_state.scan_path);
-
-                // If we're in a folder group, strip the folder prefix from the path
-                if let Context::FolderItems = ctx {
-                    if let Some(ref folder_path) = current_folder_path {
-                        // Normalize paths for comparison (handle both / and \)
-                        let normalized_folder = folder_path.replace('\\', "/");
-                        let normalized_path = path_str.replace('\\', "/");
-
-                        // Strip the folder path prefix from the item path
-                        if normalized_path.starts_with(&normalized_folder) {
-                            // Remove the folder path and the following separator
-                            let remaining = &normalized_path[normalized_folder.len()..];
-                            path_str = if let Some(stripped) = remaining.strip_prefix('/') {
-                                stripped.to_string()
-                            } else if remaining.is_empty() {
-                                // If the item path is exactly the folder path, show just the filename
-                                item.path
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| remaining.to_string())
-                            } else {
-                                remaining.to_string()
-                            };
-                        }
-                    }
-                }
 
                 let size_str = bytesize::to_string(item.size_bytes, true);
-                let fixed = indent.len() + 3 /*prefix+spaces*/ + 3 /*checkbox*/ + 1 /*space*/ + 2 /*two spaces before size*/ + 8;
-                let max_len = (inner.width as usize).saturating_sub(fixed).max(8);
-                let path_display = if path_str.len() > max_len {
-                    format!(
-                        "...{}",
-                        &path_str[path_str.len().saturating_sub(max_len.saturating_sub(3))..]
-                    )
+                let ago_str = if item.category == "Installed Applications" {
+                    Some(format_ago(item.last_opened))
                 } else {
-                    path_str
+                    None
                 };
+
+                let fixed = indent.len()
+                    + 3 /*prefix+spaces*/
+                    + 3 /*checkbox*/
+                    + 1 /*space*/
+                    + 2 /*two spaces before size*/
+                    + 8 /*size*/
+                    + if ago_str.is_some() { 3 /*" | "*/ + 8 /*ago*/ } else { 0 };
+                let max_len = (inner.width as usize).saturating_sub(fixed).max(8);
+                let path_display = truncate_end(&path_str, max_len);
 
                 // Add underline to path when cursor is on this item
                 let path_style = if is_cursor {
@@ -563,12 +650,16 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                     Span::styled(" ", row_style),
                     Span::styled(path_display, path_style),
                     Span::styled(format!("  {:>8}", size_str), apply_sel(Styles::secondary())),
+                    if let Some(ago) = ago_str {
+                        Span::styled(format!(" | {:>8}", ago), apply_sel(Styles::secondary()))
+                    } else {
+                        Span::raw("")
+                    },
                 ]);
                 lines.push(item_line);
             }
             crate::tui::state::ResultsRow::Spacer => {
-                ctx = Context::None;
-                current_folder_path = None; // Clear folder path when leaving folder context
+                folder_stack.clear();
                 lines.push(Line::from(""));
             }
         }

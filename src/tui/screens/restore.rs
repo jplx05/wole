@@ -115,6 +115,40 @@ fn render_content(f: &mut Frame, area: Rect, app_state: &AppState, _is_small: bo
                     Span::styled("Errors: ", Styles::primary()),
                     Span::styled(format!("{}", restore_result.errors), Styles::error()),
                 ]));
+
+                // Show error reasons if available
+                if !restore_result.error_reasons.is_empty() {
+                    lines.push(Line::from(vec![Span::styled("", Styles::primary())])); // Empty line
+                    lines.push(Line::from(vec![Span::styled(
+                        "Error details: ",
+                        Styles::primary(),
+                    )]));
+                    for reason in &restore_result.error_reasons {
+                        // Truncate long error messages for display
+                        let max_len = (area.width as usize).saturating_sub(4);
+                        let display_reason = if reason.len() > max_len {
+                            format!(
+                                "...{}",
+                                &reason[reason.len().saturating_sub(max_len.saturating_sub(3))..]
+                            )
+                        } else {
+                            reason.clone()
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled("  • ", Styles::muted()),
+                            Span::styled(display_reason, Styles::error()),
+                        ]));
+                    }
+                    if restore_result.errors > restore_result.error_reasons.len() {
+                        lines.push(Line::from(vec![Span::styled(
+                            format!(
+                                "  ... and {} more errors",
+                                restore_result.errors - restore_result.error_reasons.len()
+                            ),
+                            Styles::muted(),
+                        )]));
+                    }
+                }
             }
 
             if restore_result.not_found > 0 {

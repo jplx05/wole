@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::output::CategoryResult;
-use crate::scan_events::ScanProgressEvent;
+use crate::scan_events::{ScanPathReporter, ScanProgressEvent};
 use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
 use std::env;
@@ -34,6 +34,7 @@ pub fn scan(_root: &Path, config: &Config) -> Result<CategoryResult> {
             &cutoff,
             &mut files_with_sizes,
             config,
+            None,
         );
     }
 
@@ -41,7 +42,7 @@ pub fn scan(_root: &Path, config: &Config) -> Result<CategoryResult> {
     if let Ok(local_appdata) = env::var("LOCALAPPDATA") {
         let local_temp = PathBuf::from(&local_appdata).join("Temp");
         if local_temp.exists() {
-            scan_temp_dir(&local_temp, &cutoff, &mut files_with_sizes, config);
+            scan_temp_dir(&local_temp, &cutoff, &mut files_with_sizes, config, None);
         }
     }
 
@@ -62,8 +63,12 @@ pub fn scan(_root: &Path, config: &Config) -> Result<CategoryResult> {
 }
 
 /// Scan with real-time progress events (for TUI).
-pub fn scan_with_progress(_root: &Path, tx: &Sender<ScanProgressEvent>) -> Result<CategoryResult> {
-    const CATEGORY: &str = "Temp";
+pub fn scan_with_progress(
+    _root: &Path,
+    config: &Config,
+    tx: &Sender<ScanProgressEvent>,
+) -> Result<CategoryResult> {
+    const CATEGORY: &str = "Temp Files";
     let cutoff = Utc::now() - Duration::days(1);
 
     let mut result = CategoryResult::default();
@@ -98,12 +103,11 @@ pub fn scan_with_progress(_root: &Path, tx: &Sender<ScanProgressEvent>) -> Resul
         return Ok(result);
     }
 
-    // Note: scan_with_progress doesn't have access to config, so we use default
-    // This is acceptable since temp directories are typically not excluded
-    let default_config = Config::default();
+    let reporter = ScanPathReporter::new(CATEGORY, tx.clone(), 10);
+
     for (idx, root) in temp_roots.iter().enumerate() {
         if root.exists() {
-            scan_temp_dir(root, &cutoff, &mut files_with_sizes, &default_config);
+            scan_temp_dir(root, &cutoff, &mut files_with_sizes, config, Some(&reporter));
         }
         let _ = tx.send(ScanProgressEvent::CategoryProgress {
             category: CATEGORY.to_string(),
@@ -137,6 +141,7 @@ fn scan_temp_dir(
     cutoff: &chrono::DateTime<Utc>,
     files: &mut Vec<(PathBuf, u64)>,
     config: &Config,
+    reporter: Option<&ScanPathReporter>,
 ) {
     for entry in WalkDir::new(temp_path)
         .max_depth(3)
@@ -155,6 +160,10 @@ fn scan_temp_dir(
             Ok(e) => e,
             Err(_) => continue,
         };
+
+        if let Some(reporter) = reporter {
+            reporter.emit_path(entry.path());
+        }
 
         let metadata = match entry.metadata() {
             Ok(m) if m.is_file() => m,

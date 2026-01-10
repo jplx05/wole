@@ -42,6 +42,8 @@ battery = { version = "0.7", optional = true }  # Battery information (optional)
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"            # Windows registry access for installed applications
+windows = { version = "0.58", features = ["Win32_System_Performance", "Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Graphics_Dxgi"] }  # Windows Performance Counters, File System APIs, and DXGI for GPU metrics
+wmi = "0.14"               # Windows Management Instrumentation for advanced process metrics
 
 [features]
 default = ["battery"]

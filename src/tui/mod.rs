@@ -25,9 +25,9 @@ use self::state::AppState;
 use crate::cleaner;
 use crate::cli::ScanOptions;
 use crate::config::Config;
-use crate::output::OutputMode;
 use crate::restore;
 use crate::scanner;
+use crate::scan_events::ScanProgressEvent;
 
 /// Run the TUI application
 pub fn run(initial_state: Option<AppState>) -> Result<()> {
@@ -42,11 +42,29 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
     let mut app_state = initial_state.unwrap_or_default();
     let mut scan_pending = false;
     let mut clean_pending = false;
+    let mut last_tick_update = std::time::Instant::now();
 
     // Main event loop
     loop {
-        // Increment tick for animations
-        app_state.tick = app_state.tick.wrapping_add(1);
+        // Increment tick frequently when scanning, cleaning, or restoring (for smooth spinner animation)
+        if matches!(app_state.screen, crate::tui::state::Screen::Scanning { .. })
+            || matches!(app_state.screen, crate::tui::state::Screen::Cleaning { .. })
+            || matches!(
+                app_state.screen,
+                crate::tui::state::Screen::Restore {
+                    progress: Some(_),
+                    ..
+                }
+            )
+        {
+            if last_tick_update.elapsed().as_millis() >= 100 {
+                app_state.tick = app_state.tick.wrapping_add(1);
+                last_tick_update = std::time::Instant::now();
+            }
+        } else {
+            // For other screens, increment tick normally for animations
+            app_state.tick = app_state.tick.wrapping_add(1);
+        }
 
         // Auto-refresh Status screen every 2 seconds
         if let crate::tui::state::Screen::Status {
@@ -54,6 +72,24 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
             ref mut last_refresh,
         } = app_state.screen
         {
+            // Trigger disk breakdown scan in background on first load if cache is empty
+            #[cfg(windows)]
+            {
+                use crate::status::gather_disk_breakdown_cached_only;
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static DISK_BREAKDOWN_TRIGGERED: AtomicBool = AtomicBool::new(false);
+                
+                // Check if we need to trigger background scan (only once per session)
+                if !DISK_BREAKDOWN_TRIGGERED.load(Ordering::Relaxed) {
+                    if gather_disk_breakdown_cached_only().is_none() {
+                        // Cache is empty, trigger background scan
+                        use crate::status::refresh_disk_breakdown_async;
+                        refresh_disk_breakdown_async();
+                    }
+                    DISK_BREAKDOWN_TRIGGERED.store(true, Ordering::Relaxed);
+                }
+            }
+            
             if last_refresh.elapsed().as_secs() >= 2 {
                 use crate::status::gather_status;
                 use sysinfo::System;
@@ -136,6 +172,7 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
                                 restored_bytes: result.restored_bytes,
                                 errors: result.errors,
                                 not_found: result.not_found,
+                                error_reasons: result.error_reasons,
                             }),
                             restore_all_bin,
                         };
@@ -150,7 +187,7 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
             continue;
         }
 
-        // Handle pending scan
+        // Handle pending scan - start scan in background if not already running
         if scan_pending {
             scan_pending = false;
 
@@ -159,6 +196,9 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
                 // Screen changed (likely cancelled), skip scanning
                 continue;
             }
+
+            // Check if scan is already running (we store the receiver in app_state)
+            // For now, just start the scan - the main loop will check for completion
 
             // Check if this is a Disk Insights scan (Analyze action)
             if app_state.pending_action == crate::tui::state::PendingAction::Analyze {
@@ -240,10 +280,13 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
                 }
             }
 
-            // Redraw to show the scanning state before blocking
+            // Increment tick when scan starts (for spinner animation)
+            app_state.tick = app_state.tick.wrapping_add(1);
+
+            // Redraw to show the scanning state
             terminal.draw(|f| render(f, &mut app_state))?;
 
-            // Perform actual scan with progress updates
+            // Perform actual scan with progress updates (runs in background, main loop continues)
             match perform_scan_with_progress(&mut app_state, &mut terminal) {
                 Ok(()) => {
                     // Check if scan was cancelled (screen changed during scan)
@@ -317,11 +360,12 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
 
             // Now perform cleanup with real-time updates
             match perform_cleanup(&mut app_state, permanent_delete, &mut terminal) {
-                Ok((cleaned, cleaned_bytes, errors)) => {
+                Ok((cleaned, cleaned_bytes, errors, failed_temp_files)) => {
                     app_state.screen = crate::tui::state::Screen::Success {
                         cleaned,
                         cleaned_bytes,
                         errors,
+                        failed_temp_files,
                     };
                     app_state.permanent_delete = false; // Reset flag
                 }
@@ -418,11 +462,122 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
     Ok(())
 }
 
+/// Check if we can reuse existing scan results
+/// Returns true if existing results can be reused for the current scan configuration
+///
+/// Reuse is allowed if:
+/// - Current enabled categories are a subset of (or equal to) previously scanned categories
+/// - This means if user scans 5 categories, then disables one, we can reuse results for the remaining 4
+fn can_reuse_scan_results(app_state: &AppState) -> bool {
+    // Check if we have existing scan results
+    let Some(_) = app_state.scan_results else {
+        return false;
+    };
+
+    // Check if we have stored categories from the last scan
+    let Some(ref last_categories) = app_state.last_scan_categories else {
+        // No previous scan categories stored, can't verify - perform new scan to be safe
+        return false;
+    };
+
+    // Get currently enabled categories
+    let current_categories: std::collections::HashSet<String> = app_state
+        .categories
+        .iter()
+        .filter(|cat| cat.enabled)
+        .map(|cat| cat.name.clone())
+        .collect();
+
+    // Reuse if current categories are a subset of (or equal to) last scan categories
+    // This handles the case: scan 5 categories → disable 1 → clean (show 4 categories from existing results)
+    // But if user enables a NEW category that wasn't scanned, we need a new scan
+    current_categories.is_subset(last_categories)
+}
+
 /// Perform a scan with progress updates
 fn perform_scan_with_progress(
     app_state: &mut AppState,
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
 ) -> anyhow::Result<()> {
+    // Check if we can reuse existing scan results
+    if can_reuse_scan_results(app_state) {
+        // We have existing results that match, just update the progress display
+        // and proceed to process them
+        let enabled_categories: Vec<String> = app_state
+            .categories
+            .iter()
+            .filter(|cat| cat.enabled)
+            .map(|cat| cat.name.clone())
+            .collect();
+
+        let total_categories = enabled_categories.len();
+
+        // Update progress to show all categories as complete
+        if let crate::tui::state::Screen::Scanning { ref mut progress } = app_state.screen {
+            for cat_progress in &mut progress.category_progress {
+                cat_progress.completed = true;
+                cat_progress.progress_pct = 1.0;
+            }
+            progress.total_scanned = total_categories;
+        }
+
+        // Get results from existing scan
+        let results = app_state.scan_results.as_ref().unwrap();
+
+        // Update progress with actual sizes
+        let mut running_total_items = 0;
+        let mut running_total_bytes = 0u64;
+
+        for cat_progress_name in &enabled_categories {
+            let (items, size) = match cat_progress_name.as_str() {
+                "Package Cache" => (results.cache.items, results.cache.size_bytes),
+                "Application Cache" => (results.app_cache.items, results.app_cache.size_bytes),
+                "Temp Files" => (results.temp.items, results.temp.size_bytes),
+                "Trash" => (results.trash.items, results.trash.size_bytes),
+                "Build Artifacts" => (results.build.items, results.build.size_bytes),
+                "Old Downloads" => (results.downloads.items, results.downloads.size_bytes),
+                "Large Files" => (results.large.items, results.large.size_bytes),
+                "Old Files" => (results.old.items, results.old.size_bytes),
+                "Installed Applications" => {
+                    (results.applications.items, results.applications.size_bytes)
+                }
+                "Browser Cache" => (results.browser.items, results.browser.size_bytes),
+                "System Cache" => (results.system.items, results.system.size_bytes),
+                "Empty Folders" => (results.empty.items, results.empty.size_bytes),
+                "Duplicates" => (results.duplicates.items, results.duplicates.size_bytes),
+                "Windows Update" => (results.windows_update.items, results.windows_update.size_bytes),
+                "Event Logs" => (results.event_logs.items, results.event_logs.size_bytes),
+                _ => (0, 0),
+            };
+
+            running_total_items += items;
+            running_total_bytes += size;
+
+            if let crate::tui::state::Screen::Scanning { ref mut progress } = app_state.screen {
+                for cat_progress in &mut progress.category_progress {
+                    if cat_progress.name == *cat_progress_name {
+                        cat_progress.size = Some(size);
+                        break;
+                    }
+                }
+                progress.total_found = running_total_items;
+                progress.total_size = running_total_bytes;
+            }
+        }
+
+        // Redraw to show the updated progress
+        let _ = terminal.draw(|f| render(f, app_state));
+        // Small delay to make the update visible
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Don't update last_scan_categories here - keep the original set
+        // This allows reusing results even if user temporarily disables some categories
+        // Example: scan with 5 categories → disable 1 → clean (reuse) → re-enable → clean (still reuse)
+
+        // Results are already in app_state.scan_results, so we're done
+        return Ok(());
+    }
+
     // Get enabled categories
     let enabled_categories: Vec<String> = app_state
         .categories
@@ -447,22 +602,26 @@ fn perform_scan_with_progress(
     let mut system = false;
     let mut empty = false;
     let mut duplicates = false;
+    let mut windows_update = false;
+    let mut event_logs = false;
 
     for cat in &app_state.categories {
         match cat.name.as_str() {
-            "Package cache" => cache = cat.enabled,
-            "Application cache" => app_cache = cat.enabled,
-            "Temp" => temp = cat.enabled,
+            "Package Cache" => cache = cat.enabled,
+            "Application Cache" => app_cache = cat.enabled,
+            "Temp Files" => temp = cat.enabled,
             "Trash" => trash = cat.enabled,
-            "Build" => build = cat.enabled,
-            "Downloads" => downloads = cat.enabled,
-            "Large" => large = cat.enabled,
-            "Old" => old = cat.enabled,
-            "Applications" => applications = cat.enabled,
-            "Browser" => browser = cat.enabled,
-            "System" => system = cat.enabled,
-            "Empty" => empty = cat.enabled,
+            "Build Artifacts" => build = cat.enabled,
+            "Old Downloads" => downloads = cat.enabled,
+            "Large Files" => large = cat.enabled,
+            "Old Files" => old = cat.enabled,
+            "Installed Applications" => applications = cat.enabled,
+            "Browser Cache" => browser = cat.enabled,
+            "System Cache" => system = cat.enabled,
+            "Empty Folders" => empty = cat.enabled,
             "Duplicates" => duplicates = cat.enabled,
+            "Windows Update" => windows_update = cat.enabled,
+            "Event Logs" => event_logs = cat.enabled,
             _ => {}
         }
     }
@@ -487,6 +646,8 @@ fn perform_scan_with_progress(
         system,
         empty,
         duplicates,
+        windows_update,
+        event_logs,
         project_age_days: config.thresholds.project_age_days,
         min_age_days: config.thresholds.min_age_days,
         min_size_bytes,
@@ -540,12 +701,159 @@ fn perform_scan_with_progress(
         return Ok(());
     }
 
-    let results = scanner::scan_all(
-        &app_state.scan_path,
-        options,
-        OutputMode::Quiet, // Quiet mode for TUI
-        &config,
-    )?;
+    // Run scan in background thread - this is a blocking call but we need results
+    // The main loop will continue running and updating tick/redrawing while we wait
+    let scan_path = app_state.scan_path.clone();
+    let scan_options = options.clone();
+    let scan_config = config.clone();
+
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+    let _scan_handle = std::thread::spawn(move || {
+        let result = scanner::scan_all_with_progress(
+            &scan_path,
+            scan_options,
+            &scan_config,
+            &progress_tx,
+        );
+        let _ = result_tx.send(result);
+    });
+
+    // Wait for scan to complete, manually updating tick and redrawing for spinner animation
+    let mut last_tick_update = std::time::Instant::now();
+    let mut last_progress_draw = std::time::Instant::now();
+    let mut running_total_items = 0usize;
+    let mut running_total_bytes = 0u64;
+    let mut completed_categories: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
+    let mut apply_progress_event = |event: ScanProgressEvent, app_state: &mut AppState| {
+        if let crate::tui::state::Screen::Scanning { ref mut progress } = app_state.screen {
+            match event {
+                ScanProgressEvent::CategoryStarted {
+                    category,
+                    current_path,
+                    ..
+                } => {
+                    progress.current_category = category.clone();
+                    if let Some(path) = current_path {
+                        progress.current_path = Some(path);
+                    }
+                    if let Some(cat_progress) = progress
+                        .category_progress
+                        .iter_mut()
+                        .find(|c| c.name == category)
+                    {
+                        cat_progress.completed = false;
+                        cat_progress.progress_pct = 0.0;
+                    }
+                }
+                ScanProgressEvent::CategoryProgress {
+                    category,
+                    completed_units,
+                    total_units,
+                    current_path,
+                } => {
+                    progress.current_category = category.clone();
+                    if let Some(path) = current_path {
+                        progress.current_path = Some(path);
+                    }
+                    if let Some(cat_progress) = progress
+                        .category_progress
+                        .iter_mut()
+                        .find(|c| c.name == category)
+                    {
+                        if let Some(total) = total_units {
+                            if total > 0 {
+                                cat_progress.progress_pct = completed_units as f32 / total as f32;
+                            }
+                        }
+                    }
+                }
+                ScanProgressEvent::CategoryFinished {
+                    category,
+                    items,
+                    size_bytes,
+                } => {
+                    progress.current_category = category.clone();
+                    if let Some(cat_progress) = progress
+                        .category_progress
+                        .iter_mut()
+                        .find(|c| c.name == category)
+                    {
+                        cat_progress.completed = true;
+                        cat_progress.progress_pct = 1.0;
+                        cat_progress.size = Some(size_bytes);
+                    }
+
+                    if completed_categories.insert(category) {
+                        running_total_items += items;
+                        running_total_bytes += size_bytes;
+                        progress.total_found = running_total_items;
+                        progress.total_size = running_total_bytes;
+                    }
+
+                    progress.total_scanned = completed_categories.len();
+                }
+            }
+        }
+    };
+
+    let results = loop {
+        let mut progress_updated = false;
+        while let Ok(event) = progress_rx.try_recv() {
+            apply_progress_event(event, app_state);
+            progress_updated = true;
+        }
+        if progress_updated && last_progress_draw.elapsed().as_millis() >= 50 {
+            let _ = terminal.draw(|f| render(f, app_state));
+            last_progress_draw = std::time::Instant::now();
+        }
+
+        match result_rx.try_recv() {
+            Ok(Ok(results)) => break results,
+            Ok(Err(e)) => return Err(e),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                // Scan still in progress, check for cancellation
+                if !matches!(app_state.screen, crate::tui::state::Screen::Scanning { .. }) {
+                    return Ok(());
+                }
+
+                // Increment tick frequently for smooth spinner animation (every 100ms)
+                if last_tick_update.elapsed().as_millis() >= 100 {
+                    app_state.tick = app_state.tick.wrapping_add(1);
+                    last_tick_update = std::time::Instant::now();
+                    // Redraw terminal to show spinner animation
+                    let _ = terminal.draw(|f| render(f, app_state));
+                    last_progress_draw = last_tick_update;
+                }
+
+                // Process events to allow cancellation
+                while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+                    if let Ok(Event::Key(key)) = event::read() {
+                        if key.kind == KeyEventKind::Press {
+                            handle_event(app_state, key.code, key.modifiers);
+                            if !matches!(
+                                app_state.screen,
+                                crate::tui::state::Screen::Scanning { .. }
+                            ) {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                // Small sleep to avoid busy-waiting
+                std::thread::sleep(Duration::from_millis(16)); // ~60fps
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                return Err(anyhow::anyhow!("Scan thread disconnected"));
+            }
+        }
+    };
+
+    while let Ok(event) = progress_rx.try_recv() {
+        apply_progress_event(event, app_state);
+    }
 
     // Check if scan was cancelled after the scan completes
     if !matches!(app_state.screen, crate::tui::state::Screen::Scanning { .. }) {
@@ -553,58 +861,40 @@ fn perform_scan_with_progress(
         return Ok(());
     }
 
-    // Update progress incrementally as we process results
-    // Process each category and update totals incrementally
-    let mut running_total_items = 0;
-    let mut running_total_bytes = 0u64;
-
-    // Update category progress with sizes and update totals incrementally
-    for cat_progress_name in &enabled_categories {
-        // Check if scan was cancelled (screen changed from Scanning)
-        if !matches!(app_state.screen, crate::tui::state::Screen::Scanning { .. }) {
-            // Scan was cancelled, return early without processing remaining results
-            return Ok(());
-        }
-
-        // Process any pending events (non-blocking) to allow cancellation
-        while event::poll(Duration::from_millis(0)).unwrap_or(false) {
-            if let Ok(Event::Key(key)) = event::read() {
-                if key.kind == KeyEventKind::Press {
-                    handle_event(app_state, key.code, key.modifiers);
-                    // Check again if screen changed
-                    if !matches!(app_state.screen, crate::tui::state::Screen::Scanning { .. }) {
-                        return Ok(());
-                    }
-                }
+    if completed_categories.len() < total_categories {
+        for cat_progress_name in &enabled_categories {
+            if completed_categories.contains(cat_progress_name) {
+                continue;
             }
-        }
+            if !matches!(app_state.screen, crate::tui::state::Screen::Scanning { .. }) {
+                return Ok(());
+            }
 
-        let (items, size) = match cat_progress_name.as_str() {
-            "Cache" => (results.cache.items, results.cache.size_bytes),
-            "Temp" => (results.temp.items, results.temp.size_bytes),
-            "Trash" => (results.trash.items, results.trash.size_bytes),
-            "Build" => (results.build.items, results.build.size_bytes),
-            "Downloads" => (results.downloads.items, results.downloads.size_bytes),
-            "Large" => (results.large.items, results.large.size_bytes),
-            "Old" => (results.old.items, results.old.size_bytes),
-            "Browser" => (results.browser.items, results.browser.size_bytes),
-            "System" => (results.system.items, results.system.size_bytes),
-            "Empty" => (results.empty.items, results.empty.size_bytes),
-            "Duplicates" => (results.duplicates.items, results.duplicates.size_bytes),
-            _ => (0, 0),
-        };
+            let (items, size) = match cat_progress_name.as_str() {
+                "Package Cache" => (results.cache.items, results.cache.size_bytes),
+                "Application Cache" => (results.app_cache.items, results.app_cache.size_bytes),
+                "Temp Files" => (results.temp.items, results.temp.size_bytes),
+                "Trash" => (results.trash.items, results.trash.size_bytes),
+                "Build Artifacts" => (results.build.items, results.build.size_bytes),
+                "Old Downloads" => (results.downloads.items, results.downloads.size_bytes),
+                "Large Files" => (results.large.items, results.large.size_bytes),
+                "Old Files" => (results.old.items, results.old.size_bytes),
+                "Installed Applications" => {
+                    (results.applications.items, results.applications.size_bytes)
+                }
+                "Browser Cache" => (results.browser.items, results.browser.size_bytes),
+                "System Cache" => (results.system.items, results.system.size_bytes),
+                "Empty Folders" => (results.empty.items, results.empty.size_bytes),
+                "Duplicates" => (results.duplicates.items, results.duplicates.size_bytes),
+                _ => (0, 0),
+            };
 
-        // Update running totals
-        running_total_items += items;
-        running_total_bytes += size;
+            running_total_items += items;
+            running_total_bytes += size;
 
-        // Update progress in a scoped block to drop the mutable borrow before rendering
-        {
             if let crate::tui::state::Screen::Scanning { ref mut progress } = app_state.screen {
-                // Find and update the matching category progress
                 for cat_progress in &mut progress.category_progress {
                     if cat_progress.name == *cat_progress_name {
-                        // Update progress state incrementally
                         cat_progress.size = Some(size);
                         cat_progress.completed = true;
                         cat_progress.progress_pct = 1.0;
@@ -612,29 +902,35 @@ fn perform_scan_with_progress(
                     }
                 }
 
-                // Update totals in progress state
                 progress.total_found = running_total_items;
                 progress.total_size = running_total_bytes;
-                progress.total_scanned = total_categories; // All categories scanned
+                progress.total_scanned = total_categories;
             }
         }
-
-        // Redraw to show incremental updates (mutable borrow is dropped)
-        let _ = terminal.draw(|f| render(f, app_state));
-        // Small delay to make updates visible
-        std::thread::sleep(Duration::from_millis(30));
     }
 
     app_state.scan_results = Some(results);
+
+    // Store enabled categories for future reuse checks
+    app_state.last_scan_categories = Some(
+        app_state
+            .categories
+            .iter()
+            .filter(|cat| cat.enabled)
+            .map(|cat| cat.name.clone())
+            .collect(),
+    );
+
     Ok(())
 }
 
 /// Perform cleanup of selected items with real-time progress updates
+/// Returns (cleaned_count, cleaned_bytes, error_count, failed_temp_files)
 fn perform_cleanup(
     app_state: &mut AppState,
     permanent: bool,
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
-) -> anyhow::Result<(u64, u64, usize)> {
+) -> anyhow::Result<(u64, u64, usize, Vec<PathBuf>)> {
     use crate::categories;
     use crate::history::DeletionLog;
 
@@ -720,20 +1016,123 @@ fn perform_cleanup(
 
     // === BATCH DELETION (10-50x faster than one-by-one) ===
     // Group items by category for optimized processing
-    // Special categories (Browser, System, Empty) need individual handling
+    // Special categories (Browser, System, Empty, Package Cache) need individual handling
+    // Package Cache needs individual handling to avoid Windows dialogs blocking batch deletion
+    // Temp Files are processed separately with smaller batches to reduce batch failures
     // All other categories can be batch deleted together
 
+    let mut applications_items: Vec<(usize, std::path::PathBuf, u64)> = Vec::new();
     let mut special_items: Vec<(usize, String, std::path::PathBuf, u64)> = Vec::new();
+    let mut cache_items: Vec<(usize, std::path::PathBuf, u64)> = Vec::new();
+    let mut temp_items: Vec<(usize, std::path::PathBuf, u64)> = Vec::new();
     let mut batch_items: Vec<(usize, std::path::PathBuf, u64)> = Vec::new();
 
     for (idx, category, path, size) in items_to_clean {
         match category.as_str() {
-            "Browser" | "System" | "Empty" => {
+            "Installed Applications" => {
+                // Applications need a real uninstall step; don't batch-delete folders.
+                applications_items.push((idx, path, size));
+            }
+            "Browser Cache" | "System Cache" | "Empty Folders" => {
                 special_items.push((idx, category, path, size));
+            }
+            "Package Cache" => {
+                // Process cache individually to handle Windows dialogs
+                cache_items.push((idx, path, size));
+            }
+            "Temp Files" => {
+                // Process temp files separately with smaller batches
+                // Temp files are more likely to be locked, so smaller batches reduce failures
+                temp_items.push((idx, path, size));
             }
             _ => {
                 batch_items.push((idx, path, size));
             }
+        }
+    }
+
+    // Handle installed applications: uninstall + delete leftover artifacts.
+    // IMPORTANT: uninstall is not safely restorable, even when permanent=false.
+    if !applications_items.is_empty() {
+        if let crate::tui::state::Screen::Cleaning { ref mut progress } = app_state.screen {
+            progress.current_category =
+                format!("Uninstalling {} applications...", applications_items.len());
+        }
+        let _ = terminal.draw(|f| render(f, app_state));
+
+        let mut last_tick_update = std::time::Instant::now();
+
+        for (_idx, install_path, size_bytes) in applications_items {
+            // Update current path display (uses install folder path; display name is shown elsewhere).
+            if let crate::tui::state::Screen::Cleaning { ref mut progress } = app_state.screen {
+                progress.current_path = Some(install_path.clone());
+            }
+
+            // Keep spinner moving.
+            if last_tick_update.elapsed().as_millis() >= 100 {
+                app_state.tick = app_state.tick.wrapping_add(1);
+                last_tick_update = std::time::Instant::now();
+                let _ = terminal.draw(|f| render(f, app_state));
+            }
+
+            let display = crate::categories::applications::get_app_display_name(&install_path)
+                .unwrap_or_else(|| install_path.display().to_string());
+
+            let mut had_error = false;
+
+            // Tighten: uninstall must succeed before deleting any artifacts.
+            if crate::categories::applications::get_app_uninstall_string(&install_path).is_none() {
+                had_error = true;
+            } else if let Err(_e) = crate::categories::applications::uninstall(&install_path) {
+                had_error = true;
+            }
+
+            // Post-check: if it still appears installed, skip artifact deletion (tight/safe).
+            if !had_error && crate::categories::applications::is_still_installed(&install_path) {
+                had_error = true;
+            }
+
+            if !had_error {
+                // Remove tightly-scoped leftovers after uninstall succeeds.
+                let artifacts =
+                    crate::categories::applications::get_app_artifact_paths(&install_path);
+                for artifact in artifacts {
+                    match cleaner::delete_with_precheck(&artifact, permanent) {
+                        Ok(cleaner::DeleteOutcome::Deleted) => {}
+                        Ok(
+                            cleaner::DeleteOutcome::SkippedMissing
+                            | cleaner::DeleteOutcome::SkippedSystem,
+                        ) => {}
+                        Ok(cleaner::DeleteOutcome::SkippedLocked) => had_error = true,
+                        Err(_) => had_error = true,
+                    }
+                }
+            }
+
+            // Log + counters (always treat as permanent in history to avoid restore offering).
+            let log_as_permanent = true;
+            if had_error {
+                errors += 1;
+                history.log_failure(
+                    &install_path,
+                    size_bytes,
+                    "applications",
+                    log_as_permanent,
+                    &format!("Application uninstall/cleanup had errors: {}", display),
+                );
+            } else {
+                cleaned += 1;
+                cleaned_bytes += size_bytes;
+                history.log_success(&install_path, size_bytes, "applications", log_as_permanent);
+            }
+
+            // Update progress after each app
+            if let crate::tui::state::Screen::Cleaning { ref mut progress } = app_state.screen {
+                progress.cleaned = cleaned;
+                progress.errors = errors;
+            }
+            app_state.tick = app_state.tick.wrapping_add(1);
+            let _ = terminal.draw(|f| render(f, app_state));
         }
     }
 
@@ -744,21 +1143,45 @@ fn perform_cleanup(
         }
         let _ = terminal.draw(|f| render(f, app_state));
 
+        // Track last tick update for continuous animation
+        let mut last_tick_update = std::time::Instant::now();
+
         for (_idx, category, path, size_bytes) in special_items {
-            let delete_result = match category.as_str() {
-                "Browser" => categories::browser::clean(&path),
-                "System" => categories::system::clean(&path),
-                "Empty" => categories::empty::clean(&path),
-                _ => unreachable!(),
-            };
+            // Update current path and tick for animation
+            if let crate::tui::state::Screen::Cleaning { ref mut progress } = app_state.screen {
+                progress.current_path = Some(path.clone());
+            }
+
+            // Continuously update tick and redraw for smooth spinner animation
+            if last_tick_update.elapsed().as_millis() >= 100 {
+                app_state.tick = app_state.tick.wrapping_add(1);
+                last_tick_update = std::time::Instant::now();
+                let _ = terminal.draw(|f| render(f, app_state));
+            }
+
+            let delete_result = cleaner::delete_with_precheck(&path, permanent);
 
             match delete_result {
-                Ok(()) => {
+                Ok(cleaner::DeleteOutcome::Deleted) => {
                     cleaned += 1;
                     cleaned_bytes += size_bytes;
                     // Log success
                     let category_lower = category.to_lowercase();
                     history.log_success(&path, size_bytes, &category_lower, permanent);
+                }
+                Ok(
+                    cleaner::DeleteOutcome::SkippedMissing | cleaner::DeleteOutcome::SkippedSystem,
+                ) => {}
+                Ok(cleaner::DeleteOutcome::SkippedLocked) => {
+                    errors += 1;
+                    let category_lower = category.to_lowercase();
+                    history.log_failure(
+                        &path,
+                        size_bytes,
+                        &category_lower,
+                        permanent,
+                        "Path is locked by another process",
+                    );
                 }
                 Err(e) => {
                     errors += 1;
@@ -773,6 +1196,197 @@ fn perform_cleanup(
                     );
                 }
             }
+
+            // Update progress after each item
+            if let crate::tui::state::Screen::Cleaning { ref mut progress } = app_state.screen {
+                progress.cleaned = cleaned;
+                progress.errors = errors;
+            }
+            app_state.tick = app_state.tick.wrapping_add(1);
+            let _ = terminal.draw(|f| render(f, app_state));
+        }
+    }
+
+    // Handle cache items individually to avoid Windows dialogs blocking batch deletion
+    if !cache_items.is_empty() {
+        if let crate::tui::state::Screen::Cleaning { ref mut progress } = app_state.screen {
+            progress.current_category = format!("Cleaning {} cache items...", cache_items.len());
+        }
+        let _ = terminal.draw(|f| render(f, app_state));
+
+        // Track last tick update for continuous animation
+        let mut last_tick_update = std::time::Instant::now();
+
+        for (_idx, path, size_bytes) in cache_items {
+            // Update current file being processed
+            if let crate::tui::state::Screen::Cleaning { ref mut progress } = app_state.screen {
+                progress.current_path = Some(path.clone());
+            }
+
+            // Continuously update tick and redraw for smooth spinner animation
+            if last_tick_update.elapsed().as_millis() >= 100 {
+                app_state.tick = app_state.tick.wrapping_add(1);
+                last_tick_update = std::time::Instant::now();
+                let _ = terminal.draw(|f| render(f, app_state));
+            }
+
+            match cleaner::delete_with_precheck(&path, permanent) {
+                Ok(cleaner::DeleteOutcome::Deleted) => {
+                    cleaned += 1;
+                    cleaned_bytes += size_bytes;
+                    // Log success
+                    history.log_success(&path, size_bytes, "cache", permanent);
+                }
+                Ok(
+                    cleaner::DeleteOutcome::SkippedMissing | cleaner::DeleteOutcome::SkippedSystem,
+                ) => {}
+                Ok(cleaner::DeleteOutcome::SkippedLocked) => {
+                    errors += 1;
+                    history.log_failure(
+                        &path,
+                        size_bytes,
+                        "cache",
+                        permanent,
+                        "Path is locked by another process",
+                    );
+                }
+                Err(e) => {
+                    errors += 1;
+                    // Log failure
+                    history.log_failure(&path, size_bytes, "cache", permanent, &e.to_string());
+                }
+            }
+
+            // Update progress after each item
+            if let crate::tui::state::Screen::Cleaning { ref mut progress } = app_state.screen {
+                progress.cleaned = cleaned;
+                progress.errors = errors;
+            }
+            // Redraw to show progress with updated tick
+            app_state.tick = app_state.tick.wrapping_add(1);
+            let _ = terminal.draw(|f| render(f, app_state));
+        }
+    }
+
+    // Track failed temp files to show to user
+    let mut failed_temp_files: Vec<PathBuf> = Vec::new();
+
+    // Handle temp files separately with smaller batches to reduce failures
+    // Temp files are more likely to be locked by running applications
+    if !temp_items.is_empty() {
+        // Calculate total bytes for temp items
+        let temp_total_bytes: u64 = temp_items.iter().map(|(_, _, size)| size).sum();
+
+        // Extract just the paths for batch deletion
+        let paths: Vec<std::path::PathBuf> = temp_items.iter().map(|(_, p, _)| p.clone()).collect();
+
+        // Calculate sizes BEFORE deletion (critical for accurate logging)
+        use std::collections::HashMap;
+        let mut path_sizes: HashMap<PathBuf, u64> = HashMap::new();
+        for (_, path, size) in &temp_items {
+            path_sizes.insert(path.clone(), *size);
+        }
+
+        // Process temp files in smaller batches to reduce batch failures
+        // Smaller batches mean if one file is locked, fewer files need to be retried
+        const TEMP_BATCH_SIZE: usize = 25; // Smaller than regular batch size
+        let mut temp_success = 0;
+        let mut temp_errors = 0;
+        let mut deleted_paths = Vec::new();
+        let mut skipped_paths = Vec::new();
+
+        // Track last tick update for continuous animation
+        let mut last_tick_update = std::time::Instant::now();
+
+        for batch_chunk in paths.chunks(TEMP_BATCH_SIZE) {
+            // Update UI to show temp file deletion progress
+            if let crate::tui::state::Screen::Cleaning { ref mut progress } = app_state.screen {
+                progress.current_category =
+                    format!("Cleaning temp files... ({} total)", paths.len());
+                // Show first file in current batch as current file being processed
+                if let Some(first_path) = batch_chunk.first() {
+                    progress.current_path = Some(first_path.clone());
+                }
+            }
+
+            // Continuously update tick and redraw for smooth spinner animation
+            // Update every 100ms for smooth animation (same as scanner)
+            if last_tick_update.elapsed().as_millis() >= 100 {
+                app_state.tick = app_state.tick.wrapping_add(1);
+                last_tick_update = std::time::Instant::now();
+                let _ = terminal.draw(|f| render(f, app_state));
+            }
+
+            // Delete this batch
+            let batch_result = cleaner::clean_paths_batch(batch_chunk, permanent);
+            temp_success += batch_result.success_count;
+            temp_errors += batch_result.error_count;
+            deleted_paths.extend(batch_result.deleted_paths);
+            skipped_paths.extend(batch_result.skipped_paths);
+
+            // Update progress after each batch
+            if let crate::tui::state::Screen::Cleaning { ref mut progress } = app_state.screen {
+                progress.cleaned = cleaned + temp_success as u64;
+                progress.errors = errors + temp_errors;
+            }
+            // Redraw to show progress with updated tick
+            app_state.tick = app_state.tick.wrapping_add(1);
+            let _ = terminal.draw(|f| render(f, app_state));
+        }
+
+        // Update totals
+        cleaned += temp_success as u64;
+        errors += temp_errors;
+
+        // Log temp file deletion results
+        let mut path_to_category: HashMap<PathBuf, String> = HashMap::new();
+        for (_, path, _) in &temp_items {
+            if let Some(item) = app_state.all_items.iter().find(|i| i.path == *path) {
+                path_to_category.insert(path.clone(), item.category.to_lowercase());
+            }
+        }
+
+        // Log successes
+        for path in &deleted_paths {
+            if let Some(size) = path_sizes.get(path) {
+                let category = path_to_category
+                    .get(path)
+                    .cloned()
+                    .unwrap_or_else(|| "temp".to_string());
+                history.log_success(path, *size, &category, permanent);
+            }
+        }
+
+        // Log failures (paths that weren't deleted) and track them
+        for path in &paths {
+            if !deleted_paths.contains(path) && !skipped_paths.contains(path) {
+                failed_temp_files.push(path.clone());
+                if let Some(size) = path_sizes.get(path) {
+                    let category = path_to_category
+                        .get(path)
+                        .cloned()
+                        .unwrap_or_else(|| "temp".to_string());
+                    history.log_failure(
+                        path,
+                        *size,
+                        &category,
+                        permanent,
+                        "Temp file deletion failed (may be locked)",
+                    );
+                }
+            }
+        }
+
+        // Estimate cleaned bytes based on success ratio
+        if temp_success > 0 {
+            if temp_errors == 0 {
+                // All succeeded - add all bytes
+                cleaned_bytes += temp_total_bytes;
+            } else {
+                // Partial success - estimate based on ratio
+                let ratio = temp_success as f64 / paths.len() as f64;
+                cleaned_bytes += (temp_total_bytes as f64 * ratio) as u64;
+            }
         }
 
         // Update progress
@@ -785,13 +1399,6 @@ fn perform_cleanup(
 
     // Batch delete all remaining items (FAST PATH)
     if !batch_items.is_empty() {
-        // Update UI to show batch deletion in progress
-        if let crate::tui::state::Screen::Cleaning { ref mut progress } = app_state.screen {
-            progress.current_category = format!("Batch deleting {} files...", batch_items.len());
-            progress.current_path = None;
-        }
-        let _ = terminal.draw(|f| render(f, app_state));
-
         // Calculate total bytes for batch items
         let batch_total_bytes: u64 = batch_items.iter().map(|(_, _, size)| size).sum();
 
@@ -806,10 +1413,52 @@ fn perform_cleanup(
             path_sizes.insert(path.clone(), *size);
         }
 
-        // Use the new batch deletion function (10-50x faster!)
-        let (batch_success, batch_errors, deleted_paths) =
-            cleaner::clean_paths_batch(&paths, permanent);
+        // Process in smaller batches with progress updates to show current file and keep animation going
+        const BATCH_SIZE: usize = 50; // Process 50 files at a time for better progress visibility
+        let mut batch_success = 0;
+        let mut batch_errors = 0;
+        let mut deleted_paths = Vec::new();
+        let mut skipped_paths = Vec::new();
 
+        // Track last tick update for continuous animation
+        let mut last_tick_update = std::time::Instant::now();
+
+        for (_batch_idx, batch_chunk) in paths.chunks(BATCH_SIZE).enumerate() {
+            // Update UI to show batch deletion progress
+            if let crate::tui::state::Screen::Cleaning { ref mut progress } = app_state.screen {
+                progress.current_category = format!("Batch deleting {} files...", paths.len());
+                // Show first file in current batch as current file being processed
+                if let Some(first_path) = batch_chunk.first() {
+                    progress.current_path = Some(first_path.clone());
+                }
+            }
+
+            // Continuously update tick and redraw for smooth spinner animation
+            // Update every 100ms for smooth animation (same as scanner)
+            if last_tick_update.elapsed().as_millis() >= 100 {
+                app_state.tick = app_state.tick.wrapping_add(1);
+                last_tick_update = std::time::Instant::now();
+                let _ = terminal.draw(|f| render(f, app_state));
+            }
+
+            // Delete this batch
+            let batch_result = cleaner::clean_paths_batch(batch_chunk, permanent);
+            batch_success += batch_result.success_count;
+            batch_errors += batch_result.error_count;
+            deleted_paths.extend(batch_result.deleted_paths);
+            skipped_paths.extend(batch_result.skipped_paths);
+
+            // Update progress after each batch
+            if let crate::tui::state::Screen::Cleaning { ref mut progress } = app_state.screen {
+                progress.cleaned = cleaned + batch_success as u64;
+                progress.errors = errors + batch_errors;
+            }
+            // Redraw to show progress with updated tick
+            app_state.tick = app_state.tick.wrapping_add(1);
+            let _ = terminal.draw(|f| render(f, app_state));
+        }
+
+        // Already updated above during batch processing
         cleaned += batch_success as u64;
         errors += batch_errors;
 
@@ -835,7 +1484,7 @@ fn perform_cleanup(
 
         // Log failures (paths that weren't deleted)
         for path in &paths {
-            if !deleted_paths.contains(path) {
+            if !deleted_paths.contains(path) && !skipped_paths.contains(path) {
                 if let Some(size) = path_sizes.get(path) {
                     let category = path_to_category
                         .get(path)
@@ -891,7 +1540,7 @@ fn perform_cleanup(
         eprintln!("[DEBUG] Failed to save deletion log: {}", e);
     }
 
-    Ok((cleaned, cleaned_bytes, errors))
+    Ok((cleaned, cleaned_bytes, errors, failed_temp_files))
 }
 
 /// Perform restoration with real-time progress updates
@@ -925,13 +1574,21 @@ fn perform_restore(
     }
 
     let mut result = restore::RestoreResult::default();
+    let mut error_reasons: Vec<String> = Vec::new(); // Track error messages
     let mut files_since_redraw = 0;
     let mut last_redraw = std::time::Instant::now();
+    let mut last_tick_update = std::time::Instant::now();
     const REDRAW_INTERVAL_MS: u64 = 50;
     const REDRAW_INTERVAL_FILES: usize = 5;
 
     // Process each record
     for record in &latest_log.records {
+        // Continuously update tick and redraw for smooth spinner animation
+        if last_tick_update.elapsed().as_millis() >= 100 {
+            app_state.tick = app_state.tick.wrapping_add(1);
+            last_tick_update = std::time::Instant::now();
+            let _ = terminal.draw(|f| render(f, app_state));
+        }
         if !record.success || record.permanent {
             continue;
         }
@@ -968,8 +1625,12 @@ fn perform_restore(
                         prog.restored_bytes = result.restored_bytes;
                     }
                 }
-                Err(_e) => {
+                Err(e) => {
                     result.errors += 1;
+                    // Store error message (limit to first 5 errors to avoid cluttering)
+                    if error_reasons.len() < 5 {
+                        error_reasons.push(format!("{}: {}", record.path, e));
+                    }
 
                     // Update progress
                     if let crate::tui::state::Screen::Restore {
@@ -1005,8 +1666,14 @@ fn perform_restore(
                         Ok(()) => {
                             restored_count += 1;
                         }
-                        Err(_e) => {
+                        Err(e) => {
                             restore_errors += 1;
+                            // Store error message (limit to first 5 errors)
+                            if error_reasons.len() < 5 {
+                                let original_path =
+                                    trash_item.original_parent.join(&trash_item.name);
+                                error_reasons.push(format!("{}: {}", original_path.display(), e));
+                            }
                         }
                     }
                 }
@@ -1058,6 +1725,8 @@ fn perform_restore(
     // Final redraw
     let _ = terminal.draw(|f| render(f, app_state));
 
+    // Attach error reasons to result
+    result.error_reasons = error_reasons;
     Ok(result)
 }
 
@@ -1075,7 +1744,9 @@ fn perform_restore_all_bin(
     }
 
     let mut result = restore::RestoreResult::default();
+    let mut error_reasons: Vec<String> = Vec::new(); // Track error messages
     const BATCH_SIZE: usize = 100;
+    let mut last_tick_update = std::time::Instant::now();
 
     // Create all parent directories before bulk restore
     let mut parent_dirs: std::collections::HashSet<std::path::PathBuf> =
@@ -1095,6 +1766,12 @@ fn perform_restore_all_bin(
 
     // Restore in batches for better performance
     for batch in recycle_bin_items.chunks(BATCH_SIZE) {
+        // Continuously update tick and redraw for smooth spinner animation
+        if last_tick_update.elapsed().as_millis() >= 100 {
+            app_state.tick = app_state.tick.wrapping_add(1);
+            last_tick_update = std::time::Instant::now();
+        }
+
         // Update progress state
         if let crate::tui::state::Screen::Restore {
             progress: Some(ref mut prog),
@@ -1166,8 +1843,12 @@ fn perform_restore_all_bin(
                                 prog.restored_bytes = result.restored_bytes;
                             }
                         }
-                        Err(_err) => {
+                        Err(err) => {
                             result.errors += 1;
+                            // Store error message (limit to first 5 errors)
+                            if error_reasons.len() < 5 {
+                                error_reasons.push(format!("{}: {}", dest.display(), err));
+                            }
 
                             // Update progress
                             if let crate::tui::state::Screen::Restore {
@@ -1187,5 +1868,7 @@ fn perform_restore_all_bin(
     // Final redraw
     let _ = terminal.draw(|f| render(f, app_state));
 
+    // Attach error reasons to result
+    result.error_reasons = error_reasons;
     Ok(result)
 }

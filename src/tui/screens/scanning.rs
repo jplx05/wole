@@ -9,7 +9,6 @@ use crate::tui::{
         shortcuts::{get_shortcuts, render_shortcuts},
     },
 };
-use bytesize;
 use ratatui::{
     layout::{Constraint, Direction, Layout},
     text::{Line, Span},
@@ -20,6 +19,7 @@ use ratatui::{
 use crate::spinner;
 
 /// Generate a short fun comparison for the amount of space found
+#[allow(dead_code)]
 fn fun_comparison_short(bytes: u64) -> Option<String> {
     const MB: u64 = 1_000_000;
     const GB: u64 = 1_000_000_000;
@@ -55,18 +55,16 @@ pub fn render(f: &mut Frame, app_state: &AppState) {
 
     // Adjust constraints for small viewports
     let status_height = if is_small { 2 } else { 3 };
-    let stats_height = if is_small { 4 } else { 6 };
     let shortcuts_height = if is_small { 2 } else { 3 };
     let min_progress_height = if is_small { 3 } else { 8 };
 
-    // Layout: logo+tagline, status, progress, shortcuts
+    // Layout: logo+tagline, status, progress, shortcuts (no stats/progress section while scanning)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(LOGO_WITH_TAGLINE_HEIGHT), // Logo + 2 blank lines + tagline
             Constraint::Length(status_height),            // Status with spinner
             Constraint::Min(min_progress_height),         // Progress bars
-            Constraint::Length(stats_height),             // Stats (1 for label + box)
             Constraint::Length(shortcuts_height),         // Shortcuts
         ])
         .split(area);
@@ -107,10 +105,21 @@ pub fn render(f: &mut Frame, app_state: &AppState) {
         );
         f.render_widget(status, chunks[1]);
 
-        // Progress bars
+        // Check if scanning is still in progress (not all categories completed)
+        let is_scanning = progress.category_progress.iter().any(|cat| !cat.completed);
+
+        // Progress bars with current category display (similar to file deletion)
         if progress.category_progress.is_empty() {
+            // Animated initialization message
+            let dots = match (app_state.tick / 5) % 4 {
+                0 => "",
+                1 => ".",
+                2 => "..",
+                3 => "...",
+                _ => "",
+            };
             let empty_msg = Paragraph::new(Line::from(vec![Span::styled(
-                format!("{}  Initializing scan...", spinner),
+                format!("{}  Initializing scan{}", spinner, dots),
                 Styles::emphasis(),
             )]))
             .block(
@@ -125,69 +134,67 @@ pub fn render(f: &mut Frame, app_state: &AppState) {
             );
             f.render_widget(empty_msg, chunks[2]);
         } else {
-            render_category_progress(f, chunks[2], &progress.category_progress, app_state.tick);
-        }
+            // Split the progress area to show current file being scanned
+            let progress_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(1),                                  // Progress bars (flexible)
+                    Constraint::Length(if is_scanning { 3 } else { 0 }), // Current file display (only while scanning)
+                ])
+                .split(chunks[2]);
 
-        // Stats section with label outside
-        let stats_label_height = if is_small { 0 } else { 1 };
-        let stats_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(stats_label_height), // Label (skip on small viewports)
-                Constraint::Min(if is_small { 2 } else { 3 }), // Stats box
-            ])
-            .split(chunks[3]);
+            render_category_progress(
+                f,
+                progress_chunks[0],
+                &progress.category_progress,
+                app_state.tick,
+            );
 
-        // Section label outside the box (skip on small viewports)
-        if !is_small {
-            let label =
-                Paragraph::new(Line::from(vec![Span::styled("PROGRESS", Styles::header())]))
-                    .alignment(ratatui::layout::Alignment::Left);
-            f.render_widget(label, stats_chunks[0]);
-        }
+            // Show current file being scanned (similar to file deletion)
+            // Always show loader when scanning, even if no category status yet
+            if is_scanning {
+                // Use faster spinner animation - multiply by 4 to make it more noticeable
+                // (spinner divides by 2 internally, so tick*4 gives us tick*2 speed)
+                let loader_spinner = spinner::get_spinner(app_state.tick * 4);
 
-        // Stats content in box without title
-        let mut size_spans = vec![
-            Span::styled("  Found: ", Styles::header()),
-            Span::styled(
-                format!("{} items", progress.total_found),
-                Styles::emphasis(),
-            ),
-            Span::styled("    │    ", Styles::secondary()),
-            Span::styled("Size: ", Styles::header()),
-            Span::styled(
-                bytesize::to_string(progress.total_size, true),
-                Styles::emphasis(),
-            ),
-        ];
-
-        // Add fun comparison if size is significant
-        if let Some(comparison) = fun_comparison_short(progress.total_size) {
-            size_spans.push(Span::styled("  ", Styles::secondary()));
-            size_spans.push(Span::styled(comparison, Styles::secondary()));
-        }
-
-        let stats_lines = vec![
-            Line::from(size_spans),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("  Scanned: ", Styles::secondary()),
-                Span::styled(
-                    format!("{} locations", progress.total_scanned),
-                    Styles::secondary(),
-                ),
-            ]),
-        ];
-        let stats = Paragraph::new(stats_lines).block(
-            Block::default()
-                .borders(if is_small {
-                    Borders::TOP | Borders::BOTTOM
+                let current_file_text = if let Some(ref current_path) = progress.current_path {
+                    let path_str = crate::utils::display_path(current_path);
+                    let max_len = (progress_chunks[1].width as usize).saturating_sub(20);
+                    let display_path = if path_str.len() > max_len {
+                        format!(
+                            "...{}",
+                            &path_str[path_str.len().saturating_sub(max_len.saturating_sub(3))..]
+                        )
+                    } else {
+                        path_str
+                    };
+                    format!("{}  Reading: {}", loader_spinner, display_path)
+                } else if !progress.current_category.is_empty() {
+                    format!(
+                        "{}  Scanning: {}",
+                        loader_spinner, progress.current_category
+                    )
                 } else {
-                    Borders::ALL
-                })
-                .border_style(Styles::border()),
-        );
-        f.render_widget(stats, stats_chunks[if is_small { 0 } else { 1 }]);
+                    format!("{}  Scanning...", loader_spinner)
+                };
+
+                let current_file_paragraph = Paragraph::new(Line::from(vec![Span::styled(
+                    current_file_text,
+                    Styles::primary(),
+                )]))
+                .block(
+                    Block::default()
+                        .borders(if is_small {
+                            Borders::TOP | Borders::BOTTOM
+                        } else {
+                            Borders::ALL
+                        })
+                        .border_style(Styles::border())
+                        .title("CURRENT FILE"),
+                );
+                f.render_widget(current_file_paragraph, progress_chunks[1]);
+            }
+        }
     } else {
         // Fallback
         let is_small = area.height < 20 || area.width < 60;
@@ -209,13 +216,12 @@ pub fn render(f: &mut Frame, app_state: &AppState) {
 
     // Shortcuts
     let shortcuts = get_shortcuts(&app_state.screen, Some(app_state));
-    render_shortcuts(f, chunks[4], &shortcuts);
+    render_shortcuts(f, chunks[3], &shortcuts);
 }
 
 /// Render cleaning progress (similar to scanning)
 pub fn render_cleaning(f: &mut Frame, app_state: &AppState) {
     let area = f.area();
-    let spinner = spinner::get_spinner(app_state.tick);
 
     // Detect small viewport to adjust rendering
     let is_small = area.height < 20 || area.width < 60;
@@ -238,9 +244,11 @@ pub fn render_cleaning(f: &mut Frame, app_state: &AppState) {
     render_logo(f, chunks[0]);
     render_tagline(f, chunks[0]);
 
-    // Header with spinner
+    // Header with animated spinner
+    // Use faster animation for cleaning (every 2 ticks instead of default)
+    let cleaning_spinner = spinner::get_spinner(app_state.tick * 2);
     let header = Paragraph::new(Line::from(vec![Span::styled(
-        format!("{}  Cleaning files...", spinner),
+        format!("{}  Cleaning files...", cleaning_spinner),
         Styles::emphasis(),
     )]))
     .block(
@@ -284,11 +292,11 @@ pub fn render_cleaning(f: &mut Frame, app_state: &AppState) {
             app_state.tick,
         );
 
-        // Display current file being deleted
+        // Display current item being processed with animated loader
         let current_file_text = if let Some(ref current_path) = progress.current_path {
             // Truncate path if too long
             let path_str = current_path.display().to_string();
-            let max_len = (progress_chunks[1].width as usize).saturating_sub(4); // Account for padding
+            let max_len = (progress_chunks[1].width as usize).saturating_sub(20); // Account for padding and "Working: " prefix
             let display_path = if path_str.len() > max_len {
                 format!(
                     "...{}",
@@ -297,9 +305,20 @@ pub fn render_cleaning(f: &mut Frame, app_state: &AppState) {
             } else {
                 path_str
             };
-            format!("  Deleting: {}", display_path)
+            // Use animated spinner for current file
+            let file_spinner = spinner::get_spinner(app_state.tick * 2);
+            format!("{}  Working: {}", file_spinner, display_path)
         } else {
-            format!("{}  Preparing...", spinner)
+            // Show animated "Preparing..." with spinner
+            let prep_spinner = spinner::get_spinner(app_state.tick * 2);
+            let dots = match (app_state.tick / 5) % 4 {
+                0 => "",
+                1 => ".",
+                2 => "..",
+                3 => "...",
+                _ => "",
+            };
+            format!("{}  Preparing{}", prep_spinner, dots)
         };
 
         let current_file_paragraph = Paragraph::new(Line::from(vec![Span::styled(

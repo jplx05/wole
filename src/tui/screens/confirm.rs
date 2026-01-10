@@ -83,6 +83,13 @@ pub fn render(f: &mut Frame, app_state: &mut AppState) {
     // Warning message
     let selected_count = app_state.selected_count();
     let selected_size = app_state.selected_size();
+    let includes_apps = app_state.selected_items.iter().any(|&index| {
+        app_state
+            .all_items
+            .get(index)
+            .map(|it| it.category == "Installed Applications")
+            .unwrap_or(false)
+    });
 
     let mut warning_lines = vec![Line::from("")];
 
@@ -121,10 +128,21 @@ pub fn render(f: &mut Frame, app_state: &mut AppState) {
             warning_lines.push(Line::from(""));
         }
 
-        warning_lines.push(Line::from(vec![Span::styled(
-            "     Files will be moved to Recycle Bin (recoverable)",
-            Styles::secondary(),
-        )]));
+        if includes_apps {
+            warning_lines.push(Line::from(vec![Span::styled(
+                "     Installed Applications will be uninstalled (not recoverable)",
+                Styles::warning(),
+            )]));
+            warning_lines.push(Line::from(vec![Span::styled(
+                "     Other items follow the selected delete mode",
+                Styles::secondary(),
+            )]));
+        } else {
+            warning_lines.push(Line::from(vec![Span::styled(
+                "     Files will be moved to Recycle Bin (recoverable)",
+                Styles::secondary(),
+            )]));
+        }
     }
 
     let warning = Paragraph::new(warning_lines).block(
@@ -139,7 +157,7 @@ pub fn render(f: &mut Frame, app_state: &mut AppState) {
     let items_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(35), // Category summary (smaller)
+            Constraint::Length(48), // Category summary (wider so names are visible)
             Constraint::Min(20),    // File list (larger, takes remaining space)
         ])
         .split(chunks[2]);
@@ -155,7 +173,14 @@ pub fn render(f: &mut Frame, app_state: &mut AppState) {
         Line::from(""),
         Line::from(vec![
             Span::styled("    [Y] ", Styles::emphasis()),
-            Span::styled("Delete (to Recycle Bin)", Styles::primary()),
+            Span::styled(
+                if includes_apps {
+                    "Proceed (apps uninstall)"
+                } else {
+                    "Delete (to Recycle Bin)"
+                },
+                Styles::primary(),
+            ),
             Span::styled("       [N] ", Styles::secondary()),
             Span::styled("Cancel", Styles::secondary()),
         ]),
@@ -238,8 +263,8 @@ fn render_summary_table(f: &mut Frame, area: Rect, app_state: &AppState) {
     let table = Table::new(
         rows,
         &[
-            Constraint::Percentage(50),
-            Constraint::Length(8),
+            Constraint::Percentage(65),
+            Constraint::Length(6),
             Constraint::Length(12),
         ],
     )
@@ -323,12 +348,10 @@ fn render_file_list(f: &mut Frame, area: Rect, app_state: &mut AppState) {
         }
     }
 
-    enum Context {
-        None,
-        FlatItems,
-        FolderItems,
-    }
-    let mut ctx = Context::None;
+    // Track the current folder path at each nesting depth so items can be displayed
+    // relative to their parent folder (tree-style).
+    let mut folder_stack: Vec<String> = Vec::new();
+    let base_indent = if skip_category_header { "  " } else { "      " };
 
     // Build display lines from row model
     let mut lines: Vec<Line> = Vec::new();
@@ -353,12 +376,7 @@ fn render_file_list(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                 let Some(group) = confirm_groups.get(cat_idx) else {
                     continue;
                 };
-
-                ctx = if group.grouped_by_folder {
-                    Context::None
-                } else {
-                    Context::FlatItems
-                };
+                folder_stack.clear();
 
                 let icon = if group.safe { "✓" } else { "!" };
                 let icon_style = category_style(group.safe);
@@ -408,6 +426,7 @@ fn render_file_list(f: &mut Frame, area: Rect, app_state: &mut AppState) {
             crate::tui::state::ConfirmRow::FolderHeader {
                 cat_idx,
                 folder_idx,
+                depth,
             } => {
                 let Some(group) = confirm_groups.get(cat_idx) else {
                     continue;
@@ -415,8 +434,21 @@ fn render_file_list(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                 let Some(folder) = group.folder_groups.get(folder_idx) else {
                     continue;
                 };
+                // Capture parent folder key BEFORE we update the stack.
+                let parent_key = if depth > 0 {
+                    folder_stack.get(depth - 1).cloned()
+                } else {
+                    None
+                };
 
-                ctx = Context::FolderItems;
+                // Update folder stack for stripping item prefixes.
+                let folder_path = std::path::PathBuf::from(&folder.folder_name);
+                let folder_key = crate::utils::to_relative_path(&folder_path, &app_state.scan_path);
+                if folder_stack.len() <= depth {
+                    folder_stack.resize(depth + 1, String::new());
+                }
+                folder_stack[depth] = folder_key;
+                folder_stack.truncate(depth + 1);
 
                 let selected_in_folder = folder
                     .items
@@ -429,12 +461,27 @@ fn render_file_list(f: &mut Frame, area: Rect, app_state: &mut AppState) {
 
                 // Convert folder path to relative path
                 let folder_path = std::path::PathBuf::from(&folder.folder_name);
-                let folder_str = crate::utils::to_relative_path(&folder_path, &app_state.scan_path);
+                let mut folder_str =
+                    crate::utils::to_relative_path(&folder_path, &app_state.scan_path);
+
+                // If nested, show folder name relative to its parent folder.
+                if let Some(parent) = parent_key {
+                    if parent != "(root)" && !parent.is_empty() {
+                        let normalized_parent = parent.replace('\\', "/");
+                        let normalized_folder = folder_str.replace('\\', "/");
+                        if normalized_folder.starts_with(&normalized_parent) {
+                            let remaining = &normalized_folder[normalized_parent.len()..];
+                            folder_str =
+                                remaining.strip_prefix('/').unwrap_or(remaining).to_string();
+                        }
+                    }
+                }
                 let size_str = bytesize::to_string(folder.total_size, true);
 
-                // Adjust indent based on whether category header is shown
-                let indent = if skip_category_header { "" } else { "    " };
-                let fixed = indent.len() + 2 /*prefix*/ + 1 /*space*/ + 3 /*checkbox*/ + 1 /*space*/ + 2 /*exp*/ + 2 /*space*/ + 2 /*two spaces before size*/ + 8 + 2 /*two spaces before count*/ + 10;
+                // Indent folder headers by nesting depth.
+                let indent = format!("{base_indent}{}", "  ".repeat(depth));
+                // More conservative fixed width calculation to give more room for folder names
+                let fixed = indent.len() + 2 /*prefix*/ + 1 /*space*/ + 3 /*checkbox*/ + 1 /*space*/ + 2 /*exp*/ + 1 /*space*/ + 2 /*two spaces before size*/ + 8 + 2 /*two spaces before count*/ + 12;
                 let max_len = (inner.width as usize).saturating_sub(fixed).max(8);
                 let folder_display = if folder_str.len() > max_len {
                     format!(
@@ -459,7 +506,7 @@ fn render_file_list(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                 ]));
                 line_to_row.push(row_idx);
             }
-            crate::tui::state::ConfirmRow::Item { item_idx } => {
+            crate::tui::state::ConfirmRow::Item { item_idx, depth } => {
                 let Some(item) = app_state.all_items.get(item_idx) else {
                     continue;
                 };
@@ -472,36 +519,52 @@ fn render_file_list(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                     Styles::secondary()
                 };
 
-                // Adjust indent based on context and whether category header is shown
-                let indent = match ctx {
-                    Context::FolderItems => {
-                        if skip_category_header {
-                            "  "
-                        } else {
-                            "      "
-                        }
-                    }
-                    Context::FlatItems => {
-                        if skip_category_header {
-                            ""
-                        } else {
-                            "    "
-                        }
-                    }
-                    Context::None => {
-                        if skip_category_header {
-                            ""
-                        } else {
-                            "    "
-                        }
-                    }
-                };
+                // Indent items by their nesting depth.
+                let indent = format!("{base_indent}{}", "  ".repeat(depth));
 
-                let path_str = crate::utils::to_relative_path(&item.path, &app_state.scan_path);
+                // For applications, show the registry display name (fallback to filename/path).
+                let path_str = if item.category == "Installed Applications" {
+                    item.display_name
+                        .clone()
+                        .or_else(|| {
+                            item.path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|s| s.to_string())
+                        })
+                        .unwrap_or_else(|| {
+                            crate::utils::to_relative_path(&item.path, &app_state.scan_path)
+                        })
+                } else {
+                    let mut pstr = crate::utils::to_relative_path(&item.path, &app_state.scan_path);
+                    if depth > 0 {
+                        if let Some(folder_path) = folder_stack.get(depth - 1) {
+                            if folder_path != "(root)" && !folder_path.is_empty() {
+                                let normalized_folder = folder_path.replace('\\', "/");
+                                let normalized_path = pstr.replace('\\', "/");
+                                if normalized_path.starts_with(&normalized_folder) {
+                                    let remaining = &normalized_path[normalized_folder.len()..];
+                                    pstr = if let Some(stripped) = remaining.strip_prefix('/') {
+                                        stripped.to_string()
+                                    } else if remaining.is_empty() {
+                                        item.path
+                                            .file_name()
+                                            .and_then(|n| n.to_str())
+                                            .map(|s| s.to_string())
+                                            .unwrap_or_else(|| remaining.to_string())
+                                    } else {
+                                        remaining.to_string()
+                                    };
+                                }
+                            }
+                        }
+                    }
+                    pstr
+                };
                 let size_str = bytesize::to_string(item.size_bytes, true);
 
-                // Truncate path if needed
-                let fixed = indent.len() + 3 /*prefix+spaces*/ + 3 /*checkbox*/ + 1 /*space*/ + 2 /*two spaces before size*/ + 8;
+                // Truncate path if needed - more conservative calculation to give more room
+                let fixed = indent.len() + 3 /*prefix+spaces*/ + 3 /*checkbox*/ + 1 /*space*/ + 2 /*two spaces before size*/ + 8 + 2 /*extra padding*/;
                 let max_len = (inner.width as usize).saturating_sub(fixed).max(10);
                 let path_display = if path_str.len() > max_len {
                     format!(
@@ -522,7 +585,7 @@ fn render_file_list(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                 line_to_row.push(row_idx);
             }
             crate::tui::state::ConfirmRow::Spacer => {
-                ctx = Context::None;
+                folder_stack.clear();
                 lines.push(Line::from(""));
                 line_to_row.push(row_idx);
             }

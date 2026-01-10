@@ -122,9 +122,9 @@ pub fn render(f: &mut Frame, app_state: &AppState) {
         .constraints([
             Constraint::Length(LOGO_WITH_TAGLINE_HEIGHT), // Logo + 2 blank lines + tagline
             Constraint::Length(6),                        // Success message
-            Constraint::Min(8),                           // Stats
-            Constraint::Length(3),                        // Continue message
-            Constraint::Length(3),                        // Shortcuts
+            Constraint::Min(10), // Stats (increased to accommodate failed files list)
+            Constraint::Length(3), // Continue message
+            Constraint::Length(3), // Shortcuts
         ])
         .split(area);
 
@@ -175,6 +175,7 @@ pub fn render(f: &mut Frame, app_state: &AppState) {
         cleaned,
         cleaned_bytes,
         errors,
+        ref failed_temp_files,
     } = app_state.screen
     {
         // Count categories that were processed
@@ -216,6 +217,117 @@ pub fn render(f: &mut Frame, app_state: &AppState) {
                 Span::styled("0", Styles::success()),
             ])
         });
+
+        // Add error explanation if there are errors
+        if errors > 0 {
+            stats_lines.push(Line::from(""));
+
+            // If we have specific failed temp files, show them
+            if !failed_temp_files.is_empty() {
+                stats_lines.push(Line::from(vec![
+                    Span::styled("    ", Styles::secondary()),
+                    Span::styled("⚠ ", Styles::warning()),
+                    Span::styled(
+                        format!(
+                            "{} temp file(s) couldn't be deleted:",
+                            failed_temp_files.len()
+                        ),
+                        Styles::warning(),
+                    ),
+                ]));
+                stats_lines.push(Line::from(vec![
+                    Span::styled("    ", Styles::secondary()),
+                    Span::styled(
+                        "   They may be locked by running applications.",
+                        Styles::secondary(),
+                    ),
+                ]));
+
+                // Show up to 5 failed files (to avoid overwhelming the screen)
+                let max_display = 5;
+                let display_count = failed_temp_files.len().min(max_display);
+                for failed_path in failed_temp_files.iter().take(display_count) {
+                    // Convert to relative path for display
+                    let display_path =
+                        crate::utils::to_relative_path(failed_path, &app_state.scan_path);
+                    // Truncate long paths
+                    let max_path_len = 60;
+                    let truncated_path = if display_path.len() > max_path_len {
+                        format!(
+                            "...{}",
+                            &display_path[display_path.len().saturating_sub(max_path_len - 3)..]
+                        )
+                    } else {
+                        display_path
+                    };
+
+                    stats_lines.push(Line::from(vec![
+                        Span::styled("    ", Styles::secondary()),
+                        Span::styled(format!("  • {}", truncated_path), Styles::secondary()),
+                    ]));
+                }
+
+                if failed_temp_files.len() > max_display {
+                    stats_lines.push(Line::from(vec![
+                        Span::styled("    ", Styles::secondary()),
+                        Span::styled(
+                            format!("  ... and {} more", failed_temp_files.len() - max_display),
+                            Styles::secondary(),
+                        ),
+                    ]));
+                }
+
+                stats_lines.push(Line::from(""));
+                stats_lines.push(Line::from(vec![
+                    Span::styled("    ", Styles::secondary()),
+                    Span::styled(
+                        "   Try closing apps and running cleanup again.",
+                        Styles::secondary(),
+                    ),
+                ]));
+            } else {
+                // Check if temp files were likely involved by checking if any category group is "Temp Files"
+                let has_temp_files = app_state
+                    .category_groups
+                    .iter()
+                    .any(|group| group.name == "Temp Files");
+
+                if has_temp_files {
+                    stats_lines.push(Line::from(vec![
+                        Span::styled("    ", Styles::secondary()),
+                        Span::styled("⚠ ", Styles::warning()),
+                        Span::styled("Some temp files couldn't be deleted.", Styles::warning()),
+                    ]));
+                    stats_lines.push(Line::from(vec![
+                        Span::styled("    ", Styles::secondary()),
+                        Span::styled(
+                            "   They may be locked by running applications.",
+                            Styles::secondary(),
+                        ),
+                    ]));
+                    stats_lines.push(Line::from(vec![
+                        Span::styled("    ", Styles::secondary()),
+                        Span::styled(
+                            "   Try closing apps and running cleanup again.",
+                            Styles::secondary(),
+                        ),
+                    ]));
+                } else {
+                    stats_lines.push(Line::from(vec![
+                        Span::styled("    ", Styles::secondary()),
+                        Span::styled("⚠ ", Styles::warning()),
+                        Span::styled("Some files couldn't be deleted.", Styles::warning()),
+                    ]));
+                    stats_lines.push(Line::from(vec![
+                        Span::styled("    ", Styles::secondary()),
+                        Span::styled(
+                            "   They may be locked or in use by other processes.",
+                            Styles::secondary(),
+                        ),
+                    ]));
+                }
+            }
+        }
 
         stats_lines.push(Line::from(""));
 

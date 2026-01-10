@@ -30,6 +30,8 @@ pub struct ScanResults {
     pub system: CategoryResult,
     pub empty: CategoryResult,
     pub duplicates: CategoryResult,
+    pub windows_update: CategoryResult,
+    pub event_logs: CategoryResult,
     /// Optional duplicate groups for enhanced display (only populated for duplicates category)
     pub duplicates_groups: Option<Vec<DuplicateGroup>>,
 }
@@ -70,6 +72,8 @@ struct JsonCategories {
     system: JsonCategory,
     empty: JsonCategory,
     duplicates: JsonCategory,
+    windows_update: JsonCategory,
+    event_logs: JsonCategory,
 }
 
 #[derive(Serialize)]
@@ -135,6 +139,12 @@ pub fn print_human_with_options(
         ("System", &results.system, "[OK] Safe to clean"),
         ("Empty", &results.empty, "[OK] Safe to clean"),
         ("Duplicates", &results.duplicates, "[!] Review suggested"),
+        (
+            "Windows Update",
+            &results.windows_update,
+            "[!] Requires admin",
+        ),
+        ("Event Logs", &results.event_logs, "[!] Requires admin"),
     ];
 
     for (name, result, status) in categories {
@@ -242,7 +252,9 @@ pub fn print_human_with_options(
         + results.browser.items
         + results.system.items
         + results.empty.items
-        + results.duplicates.items;
+        + results.duplicates.items
+        + results.windows_update.items
+        + results.event_logs.items;
     let total_bytes = results.cache.size_bytes
         + results.app_cache.size_bytes
         + results.temp.size_bytes
@@ -255,7 +267,9 @@ pub fn print_human_with_options(
         + results.browser.size_bytes
         + results.system.size_bytes
         + results.empty.size_bytes
-        + results.duplicates.size_bytes;
+        + results.duplicates.size_bytes
+        + results.windows_update.size_bytes
+        + results.event_logs.size_bytes;
 
     println!("{}", Theme::divider(60));
 
@@ -303,13 +317,15 @@ fn build_clean_command(options: Option<&ScanOptions>) -> String {
         opts.system,
         opts.empty,
         opts.duplicates,
+        opts.windows_update,
+        opts.event_logs,
     ]
     .iter()
     .filter(|&&x| x)
     .count();
 
     // If all categories are enabled, use --all
-    if enabled_count == 13 {
+    if enabled_count == 15 {
         return "wole clean --all".to_string();
     }
 
@@ -353,6 +369,12 @@ fn build_clean_command(options: Option<&ScanOptions>) -> String {
     }
     if opts.duplicates {
         flags.push("--duplicates");
+    }
+    if opts.windows_update {
+        flags.push("--windows-update");
+    }
+    if opts.event_logs {
+        flags.push("--event-logs");
     }
 
     // If no flags (shouldn't happen, but be safe), fall back to --all
@@ -511,6 +533,28 @@ pub fn print_json(results: &ScanResults) -> anyhow::Result<()> {
                     .map(|p| p.to_string_lossy().to_string())
                     .collect(),
             },
+            windows_update: JsonCategory {
+                items: results.windows_update.items,
+                size_bytes: results.windows_update.size_bytes,
+                size_human: results.windows_update.size_human(),
+                paths: results
+                    .windows_update
+                    .paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect(),
+            },
+            event_logs: JsonCategory {
+                items: results.event_logs.items,
+                size_bytes: results.event_logs.size_bytes,
+                size_human: results.event_logs.size_human(),
+                paths: results
+                    .event_logs
+                    .paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect(),
+            },
         },
         summary: JsonSummary {
             total_items: results.cache.items
@@ -525,7 +569,9 @@ pub fn print_json(results: &ScanResults) -> anyhow::Result<()> {
                 + results.browser.items
                 + results.system.items
                 + results.empty.items
-                + results.duplicates.items,
+                + results.duplicates.items
+                + results.windows_update.items
+                + results.event_logs.items,
             total_bytes: results.cache.size_bytes
                 + results.app_cache.size_bytes
                 + results.temp.size_bytes
@@ -538,7 +584,9 @@ pub fn print_json(results: &ScanResults) -> anyhow::Result<()> {
                 + results.browser.size_bytes
                 + results.system.size_bytes
                 + results.empty.size_bytes
-                + results.duplicates.size_bytes,
+                + results.duplicates.size_bytes
+                + results.windows_update.size_bytes
+                + results.event_logs.size_bytes,
             total_human: bytesize::to_string(
                 results.cache.size_bytes
                     + results.app_cache.size_bytes
@@ -552,7 +600,9 @@ pub fn print_json(results: &ScanResults) -> anyhow::Result<()> {
                     + results.browser.size_bytes
                     + results.system.size_bytes
                     + results.empty.size_bytes
-                    + results.duplicates.size_bytes,
+                    + results.duplicates.size_bytes
+                    + results.windows_update.size_bytes
+                    + results.event_logs.size_bytes,
                 true,
             ),
         },
@@ -575,6 +625,8 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
     let mut categories: Vec<(&str, &CategoryResult)> = vec![
         ("Trash", &results.trash),
         ("Large Files", &results.large),
+        ("Windows Update", &results.windows_update),
+        ("Event Logs", &results.event_logs),
         ("System Cache", &results.system),
         ("Build Artifacts", &results.build),
         ("Old Downloads", &results.downloads),
@@ -690,7 +742,9 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
         + results.browser.items
         + results.system.items
         + results.empty.items
-        + results.duplicates.items;
+        + results.duplicates.items
+        + results.windows_update.items
+        + results.event_logs.items;
     let total_bytes = results.cache.size_bytes
         + results.app_cache.size_bytes
         + results.temp.size_bytes
@@ -703,7 +757,9 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
         + results.browser.size_bytes
         + results.system.size_bytes
         + results.empty.size_bytes
-        + results.duplicates.size_bytes;
+        + results.duplicates.size_bytes
+        + results.windows_update.size_bytes
+        + results.event_logs.size_bytes;
 
     // Print separator and total
     println!("{}", "─".repeat(47));

@@ -9,6 +9,43 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteOutcome {
+    Deleted,
+    SkippedMissing,
+    SkippedLocked,
+    SkippedSystem,
+}
+
+#[derive(Debug)]
+pub struct BatchDeleteResult {
+    pub success_count: usize,
+    pub error_count: usize,
+    pub deleted_paths: Vec<PathBuf>,
+    pub skipped_paths: Vec<PathBuf>,
+    pub locked_paths: Vec<PathBuf>,
+}
+
+impl BatchDeleteResult {
+    fn empty() -> Self {
+        Self {
+            success_count: 0,
+            error_count: 0,
+            deleted_paths: Vec::new(),
+            skipped_paths: Vec::new(),
+            locked_paths: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrecheckOutcome {
+    Eligible,
+    Missing,
+    Locked,
+    BlockedSystem,
+}
+
 /// Read a line from stdin, handling terminal focus loss issues on Windows.
 /// This function ensures stdin is properly synchronized and clears any stale input
 /// before reading, which fixes issues when the terminal loses and regains focus.
@@ -39,30 +76,117 @@ fn read_line_from_stdin() -> io::Result<String> {
     Ok(input)
 }
 
-/// Check if a file is locked by another process (Windows-specific)
+/// Check if a path is locked by another process (Windows-specific)
 ///
-/// Attempts to open the file with write access. If it fails with
-/// ERROR_SHARING_VIOLATION (32), the file is locked.
+/// Attempts to open the path with DELETE access and full sharing. If it fails with
+/// sharing/access errors, the path is considered in use and likely not deletable.
 #[cfg(windows)]
-fn is_file_locked(path: &Path) -> bool {
+fn is_path_locked(path: &Path) -> bool {
     use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
 
-    if !path.is_file() {
+    if !path.exists() {
         return false;
     }
 
-    match OpenOptions::new().read(true).write(true).open(path) {
+    const FILE_SHARE_READ: u32 = 0x00000001;
+    const FILE_SHARE_WRITE: u32 = 0x00000002;
+    const FILE_SHARE_DELETE: u32 = 0x00000004;
+    const DELETE: u32 = 0x00010000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
+
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    if path.is_dir() {
+        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    }
+
+    match options.open(path) {
         Ok(_) => false,
-        Err(e) if e.raw_os_error() == Some(32) => true, // ERROR_SHARING_VIOLATION
+        Err(e) if matches!(e.raw_os_error(), Some(5) | Some(32) | Some(33)) => true, // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION
         Err(_) => false,
     }
 }
 
 #[cfg(not(windows))]
-fn is_file_locked(_path: &Path) -> bool {
+fn is_path_locked(_path: &Path) -> bool {
     // On Unix, file locking works differently (advisory locks)
     // We don't check for locks here as files can still be deleted
     false
+}
+
+fn precheck_path(path: &Path) -> PrecheckOutcome {
+    if utils::is_system_path(path) {
+        return PrecheckOutcome::BlockedSystem;
+    }
+
+    if !path.exists() {
+        return PrecheckOutcome::Missing;
+    }
+
+    if is_path_locked(path) {
+        return PrecheckOutcome::Locked;
+    }
+
+    PrecheckOutcome::Eligible
+}
+
+pub fn delete_with_precheck(path: &Path, permanent: bool) -> Result<DeleteOutcome> {
+    match precheck_path(path) {
+        PrecheckOutcome::Missing => return Ok(DeleteOutcome::SkippedMissing),
+        PrecheckOutcome::Locked => return Ok(DeleteOutcome::SkippedLocked),
+        PrecheckOutcome::BlockedSystem => return Ok(DeleteOutcome::SkippedSystem),
+        PrecheckOutcome::Eligible => {}
+    }
+
+    if permanent {
+        let result = if path.is_dir() {
+            utils::safe_remove_dir_all(path)
+        } else {
+            utils::safe_remove_file(path)
+        };
+
+        match result {
+            Ok(()) => Ok(DeleteOutcome::Deleted),
+            Err(err) => {
+                if !path.exists() {
+                    Ok(DeleteOutcome::SkippedMissing)
+                } else {
+                    Err(err).with_context(|| {
+                        format!("Failed to permanently delete: {}", path.display())
+                    })
+                }
+            }
+        }
+    } else {
+        match trash::delete(path) {
+            Ok(()) => Ok(DeleteOutcome::Deleted),
+            Err(err) => {
+                if !path.exists() {
+                    Ok(DeleteOutcome::SkippedMissing)
+                } else {
+                    Err(err).with_context(|| format!("Failed to delete: {}", path.display()))
+                }
+            }
+        }
+    }
+}
+
+fn partition_existing(paths: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut remaining = Vec::new();
+    let mut deleted = Vec::new();
+
+    for path in paths {
+        if path.exists() {
+            remaining.push(path);
+        } else {
+            deleted.push(path);
+        }
+    }
+
+    (remaining, deleted)
 }
 
 /// Helper function to batch clean a category (10-50x faster than one-by-one)
@@ -109,7 +233,13 @@ fn batch_clean_category_internal(
 
     // Use batch deletion for much better performance
     // Batch deletion completes instantly, so progress updates happen after completion
-    let (success_count, error_count, deleted_paths) = clean_paths_batch(paths, permanent);
+    let BatchDeleteResult {
+        success_count,
+        error_count,
+        deleted_paths,
+        skipped_paths,
+        locked_paths,
+    } = clean_paths_batch(paths, permanent);
 
     // Log successes and failures using pre-calculated sizes
     if let Some(log) = history {
@@ -117,18 +247,32 @@ fn batch_clean_category_internal(
             let size = path_sizes.get(path).copied().unwrap_or(0);
             log.log_success(path, size, category_name, permanent);
         }
-        // Log failures (paths that weren't deleted)
+        // Log failures (paths that weren't deleted or skipped)
+        for path in &locked_paths {
+            let size = path_sizes.get(path).copied().unwrap_or(0);
+            log.log_failure(
+                path,
+                size,
+                category_name,
+                permanent,
+                "Path is locked by another process",
+            );
+        }
         for path in paths {
-            if !deleted_paths.contains(path) {
-                let size = path_sizes.get(path).copied().unwrap_or(0);
-                log.log_failure(
-                    path,
-                    size,
-                    category_name,
-                    permanent,
-                    "Batch deletion failed",
-                );
+            if deleted_paths.contains(path)
+                || skipped_paths.contains(path)
+                || locked_paths.contains(path)
+            {
+                continue;
             }
+            let size = path_sizes.get(path).copied().unwrap_or(0);
+            log.log_failure(
+                path,
+                size,
+                category_name,
+                permanent,
+                "Batch deletion failed",
+            );
         }
     }
 
@@ -170,7 +314,9 @@ pub fn clean_all(
         + results.browser.items
         + results.system.items
         + results.empty.items
-        + results.duplicates.items;
+        + results.duplicates.items
+        + results.windows_update.items
+        + results.event_logs.items;
     let total_bytes = results.cache.size_bytes
         + results.app_cache.size_bytes
         + results.temp.size_bytes
@@ -182,7 +328,9 @@ pub fn clean_all(
         + results.browser.size_bytes
         + results.system.size_bytes
         + results.empty.size_bytes
-        + results.duplicates.size_bytes;
+        + results.duplicates.size_bytes
+        + results.windows_update.size_bytes
+        + results.event_logs.size_bytes;
 
     if total_items == 0 {
         if mode != OutputMode::Quiet {
@@ -425,14 +573,34 @@ pub fn clean_all(
                     pb.inc(1);
                 }
             } else {
-                match categories::browser::clean(path) {
-                    Ok(()) => {
+                match delete_with_precheck(path, permanent) {
+                    Ok(DeleteOutcome::Deleted) => {
                         cleaned += 1;
                         if let Some(ref pb) = progress {
                             pb.inc(1);
                         }
                         if let Some(ref mut log) = history {
                             log.log_success(path, size, "browser", permanent);
+                        }
+                    }
+                    Ok(DeleteOutcome::SkippedMissing | DeleteOutcome::SkippedSystem) => {}
+                    Ok(DeleteOutcome::SkippedLocked) => {
+                        errors += 1;
+                        if let Some(ref mut log) = history {
+                            log.log_failure(
+                                path,
+                                size,
+                                "browser",
+                                permanent,
+                                "Path is locked by another process",
+                            );
+                        }
+                        if mode != OutputMode::Quiet {
+                            eprintln!(
+                                "[WARNING] Failed to clean {}: {}",
+                                Theme::secondary(&path.display().to_string()),
+                                Theme::error("Path is locked by another process")
+                            );
                         }
                     }
                     Err(e) => {
@@ -471,14 +639,34 @@ pub fn clean_all(
                     pb.inc(1);
                 }
             } else {
-                match categories::system::clean(path) {
-                    Ok(()) => {
+                match delete_with_precheck(path, permanent) {
+                    Ok(DeleteOutcome::Deleted) => {
                         cleaned += 1;
                         if let Some(ref pb) = progress {
                             pb.inc(1);
                         }
                         if let Some(ref mut log) = history {
                             log.log_success(path, size, "system", permanent);
+                        }
+                    }
+                    Ok(DeleteOutcome::SkippedMissing | DeleteOutcome::SkippedSystem) => {}
+                    Ok(DeleteOutcome::SkippedLocked) => {
+                        errors += 1;
+                        if let Some(ref mut log) = history {
+                            log.log_failure(
+                                path,
+                                size,
+                                "system",
+                                permanent,
+                                "Path is locked by another process",
+                            );
+                        }
+                        if mode != OutputMode::Quiet {
+                            eprintln!(
+                                "[WARNING] Failed to clean {}: {}",
+                                Theme::secondary(&path.display().to_string()),
+                                Theme::error("Path is locked by another process")
+                            );
                         }
                     }
                     Err(e) => {
@@ -512,14 +700,34 @@ pub fn clean_all(
                     pb.inc(1);
                 }
             } else {
-                match categories::empty::clean(path) {
-                    Ok(()) => {
+                match delete_with_precheck(path, permanent) {
+                    Ok(DeleteOutcome::Deleted) => {
                         cleaned += 1;
                         if let Some(ref pb) = progress {
                             pb.inc(1);
                         }
                         if let Some(ref mut log) = history {
                             log.log_success(path, 0, "empty", permanent);
+                        }
+                    }
+                    Ok(DeleteOutcome::SkippedMissing | DeleteOutcome::SkippedSystem) => {}
+                    Ok(DeleteOutcome::SkippedLocked) => {
+                        errors += 1;
+                        if let Some(ref mut log) = history {
+                            log.log_failure(
+                                path,
+                                0,
+                                "empty",
+                                permanent,
+                                "Path is locked by another process",
+                            );
+                        }
+                        if mode != OutputMode::Quiet {
+                            eprintln!(
+                                "[WARNING] Failed to clean {}: {}",
+                                Theme::secondary(&path.display().to_string()),
+                                Theme::error("Path is locked by another process")
+                            );
                         }
                     }
                     Err(e) => {
@@ -559,18 +767,220 @@ pub fn clean_all(
 
     // Clean installed applications (batch)
     if results.applications.items > 0 {
-        let (success, errs) = batch_clean_category_internal(
-            &results.applications.paths,
-            "applications",
-            permanent,
-            dry_run,
-            progress.as_ref(),
-            history.as_mut(),
-            mode,
-        );
-        cleaned += success;
-        errors += errs;
-        cleaned_bytes += results.applications.size_bytes;
+        if let Some(ref pb) = progress {
+            pb.set_message("Uninstalling applications...");
+        }
+
+        // IMPORTANT: uninstalling applications is not safely restorable, even if permanent=false.
+        // We still honor `permanent` for leftover file deletion (Recycle Bin vs permanent),
+        // but we always log these as permanent to avoid offering restore.
+        let log_as_permanent = true;
+
+        for path in &results.applications.paths {
+            let size = categories::applications::get_app_size(path).unwrap_or_else(|| {
+                if path.is_dir() {
+                    utils::calculate_dir_size(path)
+                } else {
+                    utils::safe_metadata(path).map(|m| m.len()).unwrap_or(0)
+                }
+            });
+
+            if dry_run {
+                cleaned += 1;
+                if let Some(ref pb) = progress {
+                    pb.inc(1);
+                }
+                cleaned_bytes += size;
+                continue;
+            }
+
+            let display = categories::applications::get_app_display_name(path)
+                .unwrap_or_else(|| path.display().to_string());
+
+            // Tighten: uninstall must succeed before we delete any install/artifact paths.
+            // This avoids leaving the app "installed" but with missing files.
+            let mut had_error = false;
+            let Some(_uninstall_cmd) = categories::applications::get_app_uninstall_string(path)
+            else {
+                // No uninstall command - skip (had_error not set here since we continue)
+                if mode != OutputMode::Quiet {
+                    eprintln!(
+                        "[WARNING] Cannot uninstall {}: {}",
+                        Theme::secondary(&display),
+                        Theme::error("No uninstall command in registry")
+                    );
+                }
+                // Do not delete any files for this app.
+                // It would leave a broken, still-installed entry.
+                if let Some(ref mut log) = history {
+                    log.log_failure(
+                        path,
+                        size,
+                        "applications",
+                        log_as_permanent,
+                        "No uninstall command in registry; skipped to avoid breaking installed app",
+                    );
+                }
+                errors += 1;
+                continue;
+            };
+
+            if let Err(e) = categories::applications::uninstall(path) {
+                had_error = true;
+                if mode != OutputMode::Quiet {
+                    eprintln!(
+                        "[WARNING] Uninstall failed for {}: {}",
+                        Theme::secondary(&display),
+                        Theme::error(&e.to_string())
+                    );
+                }
+            }
+
+            // Post-check: if it's still installed, don't delete artifacts (tight/safe).
+            if !had_error && categories::applications::is_still_installed(path) {
+                had_error = true;
+                if mode != OutputMode::Quiet {
+                    eprintln!(
+                        "[WARNING] {} still appears installed after uninstall (may require reboot). Skipping artifact deletion.",
+                        Theme::secondary(&display)
+                    );
+                }
+            }
+
+            if !had_error {
+                // Only after uninstall succeeds and entry disappears: delete app-specific leftovers.
+                let artifacts = categories::applications::get_app_artifact_paths(path);
+                for artifact in artifacts {
+                    match delete_with_precheck(&artifact, permanent) {
+                        Ok(DeleteOutcome::Deleted) => {}
+                        Ok(DeleteOutcome::SkippedMissing | DeleteOutcome::SkippedSystem) => {}
+                        Ok(DeleteOutcome::SkippedLocked) => had_error = true,
+                        Err(_) => had_error = true,
+                    }
+                }
+            }
+
+            // Update counters/logs.
+            if had_error {
+                errors += 1;
+                if let Some(ref mut log) = history {
+                    log.log_failure(
+                        path,
+                        size,
+                        "applications",
+                        log_as_permanent,
+                        "Application uninstall and/or cleanup did not complete",
+                    );
+                }
+            } else {
+                cleaned += 1;
+                if let Some(ref pb) = progress {
+                    pb.inc(1);
+                }
+                cleaned_bytes += size;
+                if let Some(ref mut log) = history {
+                    log.log_success(path, size, "applications", log_as_permanent);
+                }
+            }
+        }
+    }
+
+    // Clean Windows Update files
+    if results.windows_update.items > 0 {
+        if let Some(ref pb) = progress {
+            pb.set_message("Cleaning Windows Update files...");
+        }
+        for path in &results.windows_update.paths {
+            let size = if path.is_dir() {
+                utils::calculate_dir_size(path)
+            } else {
+                utils::safe_metadata(path).map(|m| m.len()).unwrap_or(0)
+            };
+            if dry_run {
+                cleaned += 1;
+                if let Some(ref pb) = progress {
+                    pb.inc(1);
+                }
+            } else {
+                match categories::windows_update::clean(path) {
+                    Ok(()) => {
+                        cleaned += 1;
+                        if let Some(ref pb) = progress {
+                            pb.inc(1);
+                        }
+                        if let Some(ref mut log) = history {
+                            log.log_success(path, size, "windows_update", permanent);
+                        }
+                    }
+                    Err(e) => {
+                        errors += 1;
+                        if let Some(ref mut log) = history {
+                            log.log_failure(
+                                path,
+                                size,
+                                "windows_update",
+                                permanent,
+                                &e.to_string(),
+                            );
+                        }
+                        if mode != OutputMode::Quiet {
+                            eprintln!(
+                                "[WARNING] Failed to clean {}: {}",
+                                Theme::secondary(&path.display().to_string()),
+                                Theme::error(&e.to_string())
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        cleaned_bytes += results.windows_update.size_bytes;
+    }
+
+    // Clean Event Logs
+    if results.event_logs.items > 0 {
+        if let Some(ref pb) = progress {
+            pb.set_message("Cleaning Event Logs...");
+        }
+        for path in &results.event_logs.paths {
+            let size = if path.is_dir() {
+                utils::calculate_dir_size(path)
+            } else {
+                utils::safe_metadata(path).map(|m| m.len()).unwrap_or(0)
+            };
+            if dry_run {
+                cleaned += 1;
+                if let Some(ref pb) = progress {
+                    pb.inc(1);
+                }
+            } else {
+                match categories::event_logs::clean(path) {
+                    Ok(()) => {
+                        cleaned += 1;
+                        if let Some(ref pb) = progress {
+                            pb.inc(1);
+                        }
+                        if let Some(ref mut log) = history {
+                            log.log_success(path, size, "event_logs", permanent);
+                        }
+                    }
+                    Err(e) => {
+                        errors += 1;
+                        if let Some(ref mut log) = history {
+                            log.log_failure(path, size, "event_logs", permanent, &e.to_string());
+                        }
+                        if mode != OutputMode::Quiet {
+                            eprintln!(
+                                "[WARNING] Failed to clean {}: {}",
+                                Theme::secondary(&path.display().to_string()),
+                                Theme::error(&e.to_string())
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        cleaned_bytes += results.event_logs.size_bytes;
     }
 
     // Finish progress bar
@@ -648,8 +1058,8 @@ pub fn clean_path(path: &Path, permanent: bool) -> Result<()> {
     }
 
     // Check if file is locked (Windows only)
-    if path.is_file() && is_file_locked(path) {
-        return Err(anyhow::anyhow!("File is locked by another process"));
+    if is_path_locked(path) {
+        return Err(anyhow::anyhow!("Path is locked by another process"));
     }
 
     if permanent {
@@ -679,83 +1089,69 @@ pub fn clean_path(path: &Path, permanent: bool) -> Result<()> {
 ///
 /// **CRITICAL**: System paths are filtered out before deletion for safety.
 ///
-/// Returns (success_count, error_count, successfully_deleted_paths)
-pub fn clean_paths_batch(
-    paths: &[std::path::PathBuf],
-    permanent: bool,
-) -> (usize, usize, Vec<std::path::PathBuf>) {
+/// Returns a detailed batch deletion result
+pub fn clean_paths_batch(paths: &[std::path::PathBuf], permanent: bool) -> BatchDeleteResult {
     if paths.is_empty() {
-        return (0, 0, Vec::new());
-    }
-
-    // CRITICAL SAFETY CHECK: Filter out system paths before any deletion
-    // This provides defense-in-depth protection
-    let mut safe_paths = Vec::with_capacity(paths.len());
-    let mut system_path_count = 0;
-
-    for path in paths {
-        if utils::is_system_path(path) {
-            system_path_count += 1;
-            #[cfg(debug_assertions)]
-            eprintln!(
-                "[DEBUG] Blocked system path from deletion: {}",
-                path.display()
-            );
-        } else {
-            safe_paths.push(path.clone());
-        }
+        return BatchDeleteResult::empty();
     }
 
     let mut success_count = 0;
-    let mut error_count = system_path_count; // Count system paths as errors
-    let mut deleted_paths = Vec::with_capacity(safe_paths.len());
+    let mut error_count = 0;
+    let mut deleted_paths = Vec::with_capacity(paths.len());
+    let mut skipped_paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut locked_paths: Vec<std::path::PathBuf> = Vec::new();
 
     if permanent {
         // Permanent deletes are already fast (direct filesystem ops)
         // Delete one-by-one to track individual successes/failures
-        // Note: System paths already filtered out above
-        for path in &safe_paths {
-            match clean_path(path, true) {
-                Ok(()) => {
+        for path in paths {
+            match delete_with_precheck(path, true) {
+                Ok(DeleteOutcome::Deleted) => {
                     success_count += 1;
                     deleted_paths.push(path.clone());
+                }
+                Ok(DeleteOutcome::SkippedMissing | DeleteOutcome::SkippedSystem) => {
+                    skipped_paths.push(path.clone());
+                }
+                Ok(DeleteOutcome::SkippedLocked) => {
+                    error_count += 1;
+                    locked_paths.push(path.clone());
                 }
                 Err(_) => error_count += 1,
             }
         }
     } else {
         // Batch to Recycle Bin - this is the big performance win
-        // First, filter out locked files and non-existent files (they would cause batch to fail)
-        // Note: System paths already filtered out above
+        // First, filter out locked, missing, and system paths (they would cause batch to fail)
         let mut unlocked: Vec<std::path::PathBuf> = Vec::new();
-        let mut locked_count = 0;
-        let mut non_existent_count = 0;
-
-        for path in &safe_paths {
-            if !path.exists() {
-                non_existent_count += 1;
-            } else if path.is_file() && is_file_locked(path) {
-                locked_count += 1;
-            } else {
-                unlocked.push(path.clone());
+        for path in paths {
+            match precheck_path(path) {
+                PrecheckOutcome::Missing | PrecheckOutcome::BlockedSystem => {
+                    skipped_paths.push(path.clone());
+                }
+                PrecheckOutcome::Locked => {
+                    error_count += 1;
+                    locked_paths.push(path.clone());
+                }
+                PrecheckOutcome::Eligible => unlocked.push(path.clone()),
             }
         }
-
-        error_count += locked_count;
-        error_count += non_existent_count;
 
         if !unlocked.is_empty() {
             // Try batch delete first (fastest path)
             match trash::delete_all(&unlocked) {
                 Ok(()) => {
-                    success_count = unlocked.len();
+                    success_count += unlocked.len();
                     deleted_paths.extend(unlocked);
                 }
-                Err(_e) => {
+                Err(_err) => {
+                    let (mut remaining, deleted) = partition_existing(unlocked);
+                    success_count += deleted.len();
+                    deleted_paths.extend(deleted);
+
                     // Batch failed - try smaller batches first (in case one bad file causes failure)
                     // Then fallback to one-by-one if that also fails
                     const BATCH_SIZE: usize = 100;
-                    let mut remaining: Vec<std::path::PathBuf> = unlocked;
                     #[allow(unused_assignments)]
                     let mut _batch_success = false;
 
@@ -775,8 +1171,11 @@ pub fn clean_paths_batch(
                                     _batch_success = true;
                                 }
                                 Err(_) => {
-                                    // This batch failed, add to remaining for one-by-one
-                                    new_remaining.extend(batch);
+                                    // This batch failed, keep any that still exist for one-by-one
+                                    let (still_remaining, deleted) = partition_existing(batch);
+                                    success_count += deleted.len();
+                                    deleted_paths.extend(deleted);
+                                    new_remaining.extend(still_remaining);
                                 }
                             }
                         }
@@ -787,12 +1186,17 @@ pub fn clean_paths_batch(
                     if !remaining.is_empty() {
                         #[cfg(debug_assertions)]
                         if !_batch_success {
-                            eprintln!("[DEBUG] Batch delete failed: {}, falling back to one-by-one for {} files", _e, remaining.len());
+                            eprintln!(
+                                "[DEBUG] Batch delete failed: {}, falling back to one-by-one for {} files",
+                                _err,
+                                remaining.len()
+                            );
                         }
                         for path in remaining {
                             // Double-check file exists before attempting deletion
                             if !path.exists() {
-                                error_count += 1;
+                                success_count += 1;
+                                deleted_paths.push(path);
                                 continue;
                             }
                             match trash::delete(&path) {
@@ -801,7 +1205,12 @@ pub fn clean_paths_batch(
                                     deleted_paths.push(path.clone());
                                 }
                                 Err(_err) => {
-                                    error_count += 1;
+                                    if !path.exists() {
+                                        success_count += 1;
+                                        deleted_paths.push(path.clone());
+                                    } else {
+                                        error_count += 1;
+                                    }
                                     #[cfg(debug_assertions)]
                                     eprintln!(
                                         "[DEBUG] Failed to delete {}: {}",
@@ -817,7 +1226,13 @@ pub fn clean_paths_batch(
         }
     }
 
-    (success_count, error_count, deleted_paths)
+    BatchDeleteResult {
+        success_count,
+        error_count,
+        deleted_paths,
+        skipped_paths,
+        locked_paths,
+    }
 }
 
 #[cfg(test)]
@@ -860,32 +1275,32 @@ mod tests {
     }
 
     #[test]
-    fn test_is_file_locked_regular_file() {
+    fn test_is_path_locked_regular_file() {
         let temp_dir = create_test_dir();
         let file = temp_dir.path().join("unlocked.txt");
         fs::write(&file, "test").unwrap();
 
         // File should not be locked
-        assert!(!is_file_locked(&file));
+        assert!(!is_path_locked(&file));
     }
 
     #[test]
-    fn test_is_file_locked_directory() {
+    fn test_is_path_locked_directory() {
         let temp_dir = create_test_dir();
         let dir = temp_dir.path().join("testdir");
         fs::create_dir(&dir).unwrap();
 
-        // Directories are never "locked" in our check
-        assert!(!is_file_locked(&dir));
+        // Directories without open handles should not be locked
+        assert!(!is_path_locked(&dir));
     }
 
     #[test]
-    fn test_is_file_locked_nonexistent() {
+    fn test_is_path_locked_nonexistent() {
         let temp_dir = create_test_dir();
         let nonexistent = temp_dir.path().join("nonexistent.txt");
 
         // Non-existent files are not locked
-        assert!(!is_file_locked(&nonexistent));
+        assert!(!is_path_locked(&nonexistent));
     }
 
     #[test]

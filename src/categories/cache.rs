@@ -1,12 +1,13 @@
 use crate::config::Config;
 use crate::output::{CategoryResult, OutputMode};
-use crate::scan_events::ScanProgressEvent;
+use crate::scan_events::{ScanPathReporter, ScanProgressEvent};
 use crate::theme::Theme;
 use crate::utils;
 use anyhow::{Context, Result};
 use bytesize;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 /// Package manager cache locations to scan
@@ -155,8 +156,12 @@ pub fn scan(_root: &Path, config: &Config, output_mode: OutputMode) -> Result<Ca
 
 /// Scan with real-time progress events (for TUI).
 /// Scan with real-time progress events (for TUI).
-pub fn scan_with_progress(_root: &Path, tx: &Sender<ScanProgressEvent>) -> Result<CategoryResult> {
-    const CATEGORY: &str = "Package cache";
+pub fn scan_with_progress(
+    _root: &Path,
+    config: &Config,
+    tx: &Sender<ScanProgressEvent>,
+) -> Result<CategoryResult> {
+    const CATEGORY: &str = "Package Cache";
     let total = CACHE_LOCATIONS.len() as u64;
 
     let mut result = CategoryResult::default();
@@ -170,6 +175,9 @@ pub fn scan_with_progress(_root: &Path, tx: &Sender<ScanProgressEvent>) -> Resul
         total_units: Some(total),
         current_path: None,
     });
+
+    let reporter = Arc::new(ScanPathReporter::new(CATEGORY, tx.clone(), 10));
+    let on_path = |path: &Path| reporter.emit_path(path);
 
     // Scan known package manager caches
     for (idx, (_name, location)) in CACHE_LOCATIONS.iter().enumerate() {
@@ -192,8 +200,8 @@ pub fn scan_with_progress(_root: &Path, tx: &Sender<ScanProgressEvent>) -> Resul
         };
 
         if let Some(cache_path) = cache_path {
-            if cache_path.exists() {
-                let size = utils::calculate_dir_size(&cache_path);
+            if cache_path.exists() && !config.is_excluded(&cache_path) {
+                let size = utils::calculate_dir_size_with_progress(&cache_path, &on_path);
                 if size > 0 {
                     files_with_sizes.push((cache_path.clone(), size));
                 }
@@ -236,6 +244,9 @@ pub fn scan_with_progress(_root: &Path, tx: &Sender<ScanProgressEvent>) -> Resul
 
 /// Clean (delete) a package cache directory by moving it to the Recycle Bin
 pub fn clean(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
     trash::delete(path).with_context(|| {
         format!(
             "Failed to delete package cache directory: {}",

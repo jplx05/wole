@@ -786,6 +786,7 @@ pub struct RestoreResult {
     pub restored_bytes: u64,
     pub errors: usize,
     pub not_found: usize,
+    pub error_reasons: Vec<String>, // Store error messages for display
 }
 
 impl RestoreResult {
@@ -811,6 +812,7 @@ mod tests {
         assert_eq!(result.restored_bytes, 0);
         assert_eq!(result.errors, 0);
         assert_eq!(result.not_found, 0);
+        assert_eq!(result.error_reasons.len(), 0);
     }
 
     #[test]

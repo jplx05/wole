@@ -293,6 +293,9 @@ pub fn scan(_root: &Path, config: &Config) -> Result<CategoryResult> {
 
 /// Clean (delete) a browser cache directory by moving it to the Recycle Bin
 pub fn clean(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
     trash::delete(path)
         .with_context(|| format!("Failed to delete browser cache: {}", path.display()))?;
     Ok(())

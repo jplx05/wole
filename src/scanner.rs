@@ -4,12 +4,14 @@ use crate::config::Config;
 use crate::git;
 use crate::output::{CategoryResult, OutputMode, ScanResults};
 use crate::progress;
+use crate::scan_events::ScanProgressEvent;
 use crate::theme::Theme;
 use crate::utils;
 use anyhow::Result;
 // use rayon::prelude::*; // Disabled: using sequential scan to avoid thrashing
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::Sender;
 
 /// Scan all requested categories and return aggregated results
 ///
@@ -71,6 +73,14 @@ pub fn scan_all(
 
     if options.applications {
         enabled.push(("applications", ScanTask::Applications));
+    }
+
+    if options.windows_update {
+        enabled.push(("windows_update", ScanTask::WindowsUpdate));
+    }
+
+    if options.event_logs {
+        enabled.push(("event_logs", ScanTask::EventLogs));
     }
 
     let total_categories = enabled.len();
@@ -159,6 +169,8 @@ pub fn scan_all(
                     }
                 }
                 ScanTask::Applications => categories::applications::scan(&path_owned, config, mode),
+                ScanTask::WindowsUpdate => categories::windows_update::scan(&path_owned, config),
+                ScanTask::EventLogs => categories::event_logs::scan(&path_owned, config),
             };
 
             (*name, result)
@@ -190,6 +202,8 @@ pub fn scan_all(
                 results.duplicates_groups = duplicate_groups.borrow().clone();
             }
             ("applications", Ok(r)) => results.applications = r,
+            ("windows_update", Ok(r)) => results.windows_update = r,
+            ("event_logs", Ok(r)) => results.event_logs = r,
             (name, Err(e)) => {
                 if mode != OutputMode::Quiet {
                     eprintln!("[WARNING] {} scan failed: {}", name, e);
@@ -203,6 +217,291 @@ pub fn scan_all(
     // so filter_exclusions is no longer needed. However, we keep it as a safety net
     // for any paths that might have been missed (should be rare).
     // This can be removed entirely once we verify all scanners properly handle exclusions.
+    filter_exclusions(&mut results, config);
+
+    Ok(results)
+}
+
+/// Scan all requested categories and emit progress events for TUI.
+pub fn scan_all_with_progress(
+    path: &Path,
+    options: ScanOptions,
+    config: &Config,
+    tx: &Sender<ScanProgressEvent>,
+) -> Result<ScanResults> {
+    // Clear git cache for fresh scan
+    git::clear_cache();
+
+    let mut results = ScanResults::default();
+
+    #[derive(Clone, Copy)]
+    struct ScanJob {
+        key: &'static str,
+        display: &'static str,
+        task: ScanTask,
+    }
+
+    let mut enabled: Vec<ScanJob> = Vec::new();
+
+    if options.cache {
+        enabled.push(ScanJob {
+            key: "cache",
+            display: "Package Cache",
+            task: ScanTask::Cache,
+        });
+    }
+    if options.app_cache {
+        enabled.push(ScanJob {
+            key: "app_cache",
+            display: "Application Cache",
+            task: ScanTask::AppCache,
+        });
+    }
+    if options.temp {
+        enabled.push(ScanJob {
+            key: "temp",
+            display: "Temp Files",
+            task: ScanTask::Temp,
+        });
+    }
+    if options.trash {
+        enabled.push(ScanJob {
+            key: "trash",
+            display: "Trash",
+            task: ScanTask::Trash,
+        });
+    }
+    if options.build {
+        enabled.push(ScanJob {
+            key: "build",
+            display: "Build Artifacts",
+            task: ScanTask::Build(options.project_age_days),
+        });
+    }
+    if options.downloads {
+        enabled.push(ScanJob {
+            key: "downloads",
+            display: "Old Downloads",
+            task: ScanTask::Downloads(options.min_age_days),
+        });
+    }
+    if options.large {
+        enabled.push(ScanJob {
+            key: "large",
+            display: "Large Files",
+            task: ScanTask::Large(options.min_size_bytes),
+        });
+    }
+    if options.old {
+        enabled.push(ScanJob {
+            key: "old",
+            display: "Old Files",
+            task: ScanTask::Old(options.min_age_days),
+        });
+    }
+    if options.browser {
+        enabled.push(ScanJob {
+            key: "browser",
+            display: "Browser Cache",
+            task: ScanTask::Browser,
+        });
+    }
+    if options.system {
+        enabled.push(ScanJob {
+            key: "system",
+            display: "System Cache",
+            task: ScanTask::System,
+        });
+    }
+    if options.empty {
+        enabled.push(ScanJob {
+            key: "empty",
+            display: "Empty Folders",
+            task: ScanTask::Empty,
+        });
+    }
+    if options.duplicates {
+        enabled.push(ScanJob {
+            key: "duplicates",
+            display: "Duplicates",
+            task: ScanTask::Duplicates,
+        });
+    }
+    if options.applications {
+        enabled.push(ScanJob {
+            key: "applications",
+            display: "Installed Applications",
+            task: ScanTask::Applications,
+        });
+    }
+    if options.windows_update {
+        enabled.push(ScanJob {
+            key: "windows_update",
+            display: "Windows Update",
+            task: ScanTask::WindowsUpdate,
+        });
+    }
+    if options.event_logs {
+        enabled.push(ScanJob {
+            key: "event_logs",
+            display: "Event Logs",
+            task: ScanTask::EventLogs,
+        });
+    }
+
+    if enabled.is_empty() {
+        return Ok(results);
+    }
+
+    let path_owned = path.to_path_buf();
+
+    // Clone configs for use in scan tasks
+    let build_config = config.categories.build.clone();
+    let duplicates_config = config.categories.duplicates.clone();
+
+    // Store duplicate groups separately (needs to be stored after scan)
+    use std::cell::RefCell;
+    let duplicate_groups: RefCell<Option<Vec<crate::categories::duplicates::DuplicateGroup>>> =
+        RefCell::new(None);
+
+    let scan_results: Vec<(&str, &str, Result<CategoryResult>)> = enabled
+        .iter()
+        .map(|job| {
+            let display = job.display;
+
+            let send_started = || {
+                let _ = tx.send(ScanProgressEvent::CategoryStarted {
+                    category: display.to_string(),
+                    total_units: None,
+                    current_path: None,
+                });
+            };
+
+            let result = match job.task {
+                ScanTask::Cache => categories::cache::scan_with_progress(
+                    &path_owned,
+                    config,
+                    tx,
+                ),
+                ScanTask::AppCache => {
+                    categories::app_cache::scan_with_progress(&path_owned, config, tx)
+                }
+                ScanTask::Temp => {
+                    categories::temp::scan_with_progress(&path_owned, config, tx)
+                }
+                ScanTask::Trash => {
+                    send_started();
+                    categories::trash::scan()
+                }
+                ScanTask::Build(age) => {
+                    send_started();
+                    categories::build::scan(&path_owned, age, Some(&build_config), config, OutputMode::Quiet)
+                }
+                ScanTask::Downloads(age) => {
+                    send_started();
+                    categories::downloads::scan(&path_owned, age, config, OutputMode::Quiet)
+                }
+                ScanTask::Large(size) => {
+                    send_started();
+                    categories::large::scan(&path_owned, size, config, OutputMode::Quiet)
+                }
+                ScanTask::Old(age) => {
+                    send_started();
+                    categories::old::scan(&path_owned, age, config, OutputMode::Quiet)
+                }
+                ScanTask::Browser => {
+                    send_started();
+                    categories::browser::scan(&path_owned, config)
+                }
+                ScanTask::System => {
+                    send_started();
+                    categories::system::scan(&path_owned, config)
+                }
+                ScanTask::Empty => {
+                    send_started();
+                    categories::empty::scan(&path_owned, config)
+                }
+                ScanTask::Duplicates => {
+                    send_started();
+                    match categories::duplicates::scan_with_config(
+                        &path_owned,
+                        Some(&duplicates_config),
+                        config,
+                    ) {
+                        Ok(dup_result) => {
+                            *duplicate_groups.borrow_mut() = Some(dup_result.groups.clone());
+                            Ok(dup_result.to_category_result())
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                ScanTask::Applications => {
+                    categories::applications::scan_with_progress(&path_owned, config, tx)
+                }
+                ScanTask::WindowsUpdate => {
+                    send_started();
+                    categories::windows_update::scan(&path_owned, config)
+                }
+                ScanTask::EventLogs => {
+                    send_started();
+                    categories::event_logs::scan(&path_owned, config)
+                }
+            };
+
+            if let Ok(ref category_result) = result {
+                if !matches!(
+                    job.task,
+                    ScanTask::Cache
+                        | ScanTask::AppCache
+                        | ScanTask::Temp
+                        | ScanTask::Applications
+                ) {
+                    let _ = tx.send(ScanProgressEvent::CategoryFinished {
+                        category: display.to_string(),
+                        items: category_result.items,
+                        size_bytes: category_result.size_bytes,
+                    });
+                }
+            } else if !matches!(
+                job.task,
+                ScanTask::Cache | ScanTask::AppCache | ScanTask::Temp | ScanTask::Applications
+            ) {
+                let _ = tx.send(ScanProgressEvent::CategoryFinished {
+                    category: display.to_string(),
+                    items: 0,
+                    size_bytes: 0,
+                });
+            }
+
+            (job.key, display, result)
+        })
+        .collect();
+
+    for (category, _display, result) in scan_results {
+        match (category, result) {
+            ("cache", Ok(r)) => results.cache = r,
+            ("app_cache", Ok(r)) => results.app_cache = r,
+            ("temp", Ok(r)) => results.temp = r,
+            ("trash", Ok(r)) => results.trash = r,
+            ("build", Ok(r)) => results.build = r,
+            ("downloads", Ok(r)) => results.downloads = r,
+            ("large", Ok(r)) => results.large = r,
+            ("old", Ok(r)) => results.old = r,
+            ("browser", Ok(r)) => results.browser = r,
+            ("system", Ok(r)) => results.system = r,
+            ("empty", Ok(r)) => results.empty = r,
+            ("duplicates", Ok(r)) => {
+                results.duplicates = r;
+                results.duplicates_groups = duplicate_groups.borrow().clone();
+            }
+            ("applications", Ok(r)) => results.applications = r,
+            ("windows_update", Ok(r)) => results.windows_update = r,
+            ("event_logs", Ok(r)) => results.event_logs = r,
+            (_name, Err(_e)) => {}
+            _ => {}
+        }
+    }
+
     filter_exclusions(&mut results, config);
 
     Ok(results)
@@ -224,6 +523,8 @@ enum ScanTask {
     Empty,
     Duplicates,
     Applications,
+    WindowsUpdate,
+    EventLogs,
 }
 
 /// Filter out paths matching exclusion patterns
@@ -313,6 +614,8 @@ fn filter_exclusions(results: &mut ScanResults, config: &Config) {
     results.empty.items = results.empty.paths.len();
     results.duplicates.items = results.duplicates.paths.len();
     results.applications.items = results.applications.paths.len();
+    results.windows_update.items = results.windows_update.paths.len();
+    results.event_logs.items = results.event_logs.paths.len();
 }
 
 /// Calculate total size of paths (files only - not used for directories)

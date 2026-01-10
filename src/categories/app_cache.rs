@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::output::{CategoryResult, OutputMode};
-use crate::scan_events::ScanProgressEvent;
+use crate::scan_events::{ScanPathReporter, ScanProgressEvent};
 use crate::theme::Theme;
 use crate::utils;
 use anyhow::{Context, Result};
@@ -8,6 +8,7 @@ use bytesize;
 use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 /// Application cache locations to scan
@@ -146,7 +147,11 @@ const CACHE_DIR_NAMES: &[&str] = &["Cache", "cache", "Caches", ".cache", "Cache_
 ///
 /// Scans %LOCALAPPDATA% and %APPDATA% for app directories containing cache folders.
 /// Looks for common cache directory names like "Cache", "cache", "Caches", etc.
-fn scan_app_caches(base_path: &Path, known_paths: &mut HashSet<PathBuf>) -> Vec<PathBuf> {
+fn scan_app_caches(
+    base_path: &Path,
+    known_paths: &mut HashSet<PathBuf>,
+    config: &Config,
+) -> Vec<PathBuf> {
     let mut app_cache_paths = Vec::new();
 
     if !base_path.exists() {
@@ -170,7 +175,11 @@ fn scan_app_caches(base_path: &Path, known_paths: &mut HashSet<PathBuf>) -> Vec<
         // Check for cache directories directly in the app directory
         for cache_name in CACHE_DIR_NAMES {
             let cache_path = app_dir.join(cache_name);
-            if cache_path.exists() && cache_path.is_dir() && !known_paths.contains(&cache_path) {
+            if cache_path.exists()
+                && cache_path.is_dir()
+                && !known_paths.contains(&cache_path)
+                && !config.is_excluded(&cache_path)
+            {
                 // Defer size calculation to the caller for parallelism
                 known_paths.insert(cache_path.clone());
                 app_cache_paths.push(cache_path);
@@ -191,6 +200,7 @@ fn scan_app_caches(base_path: &Path, known_paths: &mut HashSet<PathBuf>) -> Vec<
                     if cache_path.exists()
                         && cache_path.is_dir()
                         && !known_paths.contains(&cache_path)
+                        && !config.is_excluded(&cache_path)
                     {
                         // Defer size calculation to the caller for parallelism
                         known_paths.insert(cache_path.clone());
@@ -254,13 +264,13 @@ pub fn scan(_root: &Path, config: &Config, output_mode: OutputMode) -> Result<Ca
 
     // Scan app-specific caches in LOCALAPPDATA
     if let Some(ref local_appdata_path) = local_appdata {
-        let app_caches = scan_app_caches(local_appdata_path, &mut known_paths);
+        let app_caches = scan_app_caches(local_appdata_path, &mut known_paths, config);
         candidates.extend(app_caches);
     }
 
     // Scan app-specific caches in APPDATA
     if let Some(ref appdata_path) = appdata {
-        let app_caches = scan_app_caches(appdata_path, &mut known_paths);
+        let app_caches = scan_app_caches(appdata_path, &mut known_paths, config);
         candidates.extend(app_caches);
     }
 
@@ -322,8 +332,12 @@ pub fn scan(_root: &Path, config: &Config, output_mode: OutputMode) -> Result<Ca
 
 /// Scan with real-time progress events (for TUI).
 /// Scan with real-time progress events (for TUI).
-pub fn scan_with_progress(_root: &Path, tx: &Sender<ScanProgressEvent>) -> Result<CategoryResult> {
-    const CATEGORY: &str = "Application cache";
+pub fn scan_with_progress(
+    _root: &Path,
+    config: &Config,
+    tx: &Sender<ScanProgressEvent>,
+) -> Result<CategoryResult> {
+    const CATEGORY: &str = "Application Cache";
     let mut result = CategoryResult::default();
     let mut files_with_sizes: Vec<(PathBuf, u64)> = Vec::new();
     let mut known_paths = HashSet::new();
@@ -341,6 +355,9 @@ pub fn scan_with_progress(_root: &Path, tx: &Sender<ScanProgressEvent>) -> Resul
         current_path: None,
     });
 
+    let reporter = Arc::new(ScanPathReporter::new(CATEGORY, tx.clone(), 10));
+    let on_path = |path: &Path| reporter.emit_path(path);
+
     // Scan known application caches
     for (idx, (_name, location)) in APP_CACHE_LOCATIONS.iter().enumerate() {
         let cache_path = match location {
@@ -354,8 +371,8 @@ pub fn scan_with_progress(_root: &Path, tx: &Sender<ScanProgressEvent>) -> Resul
         };
 
         if let Some(cache_path) = cache_path {
-            if cache_path.exists() {
-                let size = utils::calculate_dir_size(&cache_path);
+            if cache_path.exists() && !config.is_excluded(&cache_path) {
+                let size = utils::calculate_dir_size_with_progress(&cache_path, &on_path);
                 if size > 0 {
                     known_paths.insert(cache_path.clone());
                     files_with_sizes.push((cache_path.clone(), size));
@@ -389,9 +406,9 @@ pub fn scan_with_progress(_root: &Path, tx: &Sender<ScanProgressEvent>) -> Resul
             current_path: Some(local_appdata_path.clone()),
         });
 
-        let app_caches = scan_app_caches(local_appdata_path, &mut known_paths);
+        let app_caches = scan_app_caches(local_appdata_path, &mut known_paths, config);
         for cache_path in app_caches {
-            let size = utils::calculate_dir_size(&cache_path);
+            let size = utils::calculate_dir_size_with_progress(&cache_path, &on_path);
             if size > 0 {
                 files_with_sizes.push((cache_path, size));
             }
@@ -408,9 +425,9 @@ pub fn scan_with_progress(_root: &Path, tx: &Sender<ScanProgressEvent>) -> Resul
             current_path: Some(appdata_path.clone()),
         });
 
-        let app_caches = scan_app_caches(appdata_path, &mut known_paths);
+        let app_caches = scan_app_caches(appdata_path, &mut known_paths, config);
         for cache_path in app_caches {
-            let size = utils::calculate_dir_size(&cache_path);
+            let size = utils::calculate_dir_size_with_progress(&cache_path, &on_path);
             if size > 0 {
                 files_with_sizes.push((cache_path, size));
             }

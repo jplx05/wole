@@ -36,27 +36,34 @@ pub fn render_progress_bar(
         return;
     }
 
-    // Split area into label, gauge, and status
+    // Split area into spinner, label, gauge, and status
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
+            Constraint::Length(2),  // Spinner (fixed width)
             Constraint::Length(15), // Label (fixed width)
             Constraint::Min(10),    // Gauge (flexible, minimum 10)
-            Constraint::Length(20), // Status (fixed width)
+            Constraint::Length(15), // Status (fixed width, reduced since no %)
         ])
         .split(area);
 
-    // Render label on the left
+    // Render spinner before label
+    use crate::spinner;
+    let spinner_char = spinner::get_spinner(tick);
+    let spinner_paragraph = Paragraph::new(spinner_char).style(Styles::emphasis());
+    f.render_widget(spinner_paragraph, chunks[0]);
+
+    // Render label
     let label_text = if label.len() > 13 {
         format!("{}...", &label[..13])
     } else {
         format!("{:13}", label)
     };
     let label_paragraph = Paragraph::new(label_text).style(Styles::emphasis());
-    f.render_widget(label_paragraph, chunks[0]);
+    f.render_widget(label_paragraph, chunks[1]);
 
     // Custom Animated Bar Drawing
-    let gauge_area = chunks[1];
+    let gauge_area = chunks[2];
     let width = gauge_area.width as usize;
 
     if width > 0 {
@@ -91,7 +98,7 @@ pub fn render_progress_bar(
             // (Only happens if we decided not to draw head, but logic above covers it)
         }
 
-        // Draw empty part
+        // Draw empty part (solid, no gradient)
         let empty_width = width.saturating_sub(
             filled_width
                 + if progress < 1.0 && progress > 0.0 {
@@ -101,12 +108,9 @@ pub fn render_progress_bar(
                 },
         );
         if empty_width > 0 {
-            let empty_char = "░";
+            let empty_char = " ";
             let empty_str = empty_char.repeat(empty_width);
-            bar_spans.push(Span::styled(
-                empty_str,
-                Styles::secondary().add_modifier(ratatui::style::Modifier::DIM),
-            ));
+            bar_spans.push(Span::styled(empty_str, Styles::secondary()));
         }
 
         // Overlay percentage text
@@ -129,25 +133,21 @@ pub fn render_progress_bar(
         f.render_widget(bar_widget, gauge_area);
     }
 
-    // Render size and status on the right side
+    // Render size and status on the right side (no percentage)
     let size_text = if let Some(size_bytes) = size {
         bytesize::to_string(size_bytes, true)
     } else {
         "---".to_string()
     };
 
-    // Add percentage to status if active
-    let display_status = if progress < 1.0 && progress > 0.0 {
-        format!("{:.0}% {}", progress * 100.0, status)
-    } else {
-        status.to_string()
-    };
+    // Status without percentage
+    let display_status = status.to_string();
 
     let status_text = format!("{:>8} {}", size_text, display_status);
     let status_line = Line::from(vec![Span::styled(status_text, Styles::secondary())]);
 
     let status_paragraph = Paragraph::new(status_line);
-    f.render_widget(status_paragraph, chunks[2]);
+    f.render_widget(status_paragraph, chunks[3]);
 }
 
 /// Render multiple category progress bars
@@ -209,35 +209,21 @@ pub fn render_category_progress(
     for (i, cat) in categories.iter().enumerate() {
         if let Some(chunk) = chunks.get(i) {
             // Ensure chunk has minimum width
-            if chunk.width < 20 {
+            if chunk.width < 10 {
                 continue;
             }
 
-            let status = if cat.completed {
-                "Done".to_string()
-            } else if cat.progress_pct > 0.0 {
-                // Animated Scanning text
-                let dots = match (tick / 5) % 4 {
-                    0 => "",
-                    1 => ".",
-                    2 => "..",
-                    3 => "...",
-                    _ => "",
-                };
-                format!("Scan{}", dots)
-            } else {
-                "Wait".to_string()
-            };
-
-            render_progress_bar(
-                f,
-                *chunk,
-                &cat.name,
-                cat.progress_pct,
-                cat.size,
-                &status,
-                tick,
-            );
+            // Just show spinner and category name
+            use crate::spinner;
+            let spinner_char = spinner::get_spinner(tick);
+            let _text = format!("{}  {}", spinner_char, cat.name);
+            let line = Line::from(vec![
+                Span::styled(spinner_char, Styles::emphasis()),
+                Span::raw("  "),
+                Span::styled(&cat.name, Styles::primary()),
+            ]);
+            let paragraph = Paragraph::new(line);
+            f.render_widget(paragraph, *chunk);
         }
     }
 }

@@ -120,6 +120,14 @@ pub enum Commands {
         #[arg(long)]
         applications: bool,
 
+        /// Scan Windows Update files (download cache, logs) - requires admin
+        #[arg(long)]
+        windows_update: bool,
+
+        /// Scan Windows Event Log files (old .evtx files) - requires admin
+        #[arg(long)]
+        event_logs: bool,
+
         /// Root path to scan (default: home directory)
         #[arg(long, value_name = "PATH")]
         path: Option<PathBuf>,
@@ -203,6 +211,14 @@ pub enum Commands {
         /// Clean installed applications (Windows only)
         #[arg(long)]
         applications: bool,
+
+        /// Clean Windows Update files (download cache, logs) - requires admin
+        #[arg(long)]
+        windows_update: bool,
+
+        /// Clean Windows Event Log files (old .evtx files) - requires admin
+        #[arg(long)]
+        event_logs: bool,
 
         /// Root path to scan (default: home directory)
         #[arg(long, value_name = "PATH")]
@@ -473,6 +489,26 @@ pub enum Commands {
         #[arg(short = 'w', long)]
         watch: bool,
     },
+
+    /// Manage Windows startup programs
+    #[command(visible_alias = "su")]
+    Startup {
+        /// List all startup programs
+        #[arg(short = 'l', long)]
+        list: bool,
+
+        /// Disable a startup program by name
+        #[arg(short = 'd', long, value_name = "NAME")]
+        disable: Option<String>,
+
+        /// Enable a startup program by name
+        #[arg(short = 'e', long, value_name = "NAME")]
+        enable: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 impl Cli {
@@ -631,6 +667,8 @@ impl Cli {
                     large,
                     old,
                     applications,
+                    windows_update,
+                    event_logs,
                     path,
                     json,
                     project_age,
@@ -653,10 +691,12 @@ impl Cli {
                         system,
                         empty,
                         duplicates,
+                        windows_update,
+                        event_logs,
                     ) = if all {
                         (
                             true, true, true, true, true, true, true, true, true, true, true, true,
-                            true,
+                            true, true, true,
                         )
                     } else if !cache
                         && !app_cache
@@ -667,6 +707,8 @@ impl Cli {
                         && !large
                         && !old
                         && !applications
+                        && !windows_update
+                        && !event_logs
                     {
                         // No categories specified - show help message
                         eprintln!("No categories specified. Use --all or specify categories like --cache, --app-cache, --temp, --build");
@@ -688,6 +730,8 @@ impl Cli {
                             false,
                             false,
                             false,
+                            windows_update,
+                            event_logs,
                         )
                     };
 
@@ -730,6 +774,8 @@ impl Cli {
                         system,
                         empty,
                         duplicates,
+                        windows_update,
+                        event_logs,
                         project_age_days: config.thresholds.project_age_days,
                         min_age_days: config.thresholds.min_age_days,
                         min_size_bytes,
@@ -765,6 +811,8 @@ impl Cli {
                     empty,
                     duplicates,
                     applications,
+                    windows_update,
+                    event_logs,
                     path,
                     json,
                     yes,
@@ -790,10 +838,12 @@ impl Cli {
                         system,
                         empty,
                         duplicates,
+                        windows_update,
+                        event_logs,
                     ) = if all {
                         (
                             true, true, true, true, true, true, true, true, true, true, true, true,
-                            true,
+                            true, true, true,
                         )
                     } else if !cache
                         && !app_cache
@@ -808,6 +858,8 @@ impl Cli {
                         && !empty
                         && !duplicates
                         && !applications
+                        && !windows_update
+                        && !event_logs
                     {
                         // No categories specified - show help message
                         eprintln!("No categories specified. Use --all or specify categories like --cache, --app-cache, --temp, --build");
@@ -828,6 +880,8 @@ impl Cli {
                             system,
                             empty,
                             duplicates,
+                            windows_update,
+                            event_logs,
                         )
                     };
 
@@ -872,6 +926,8 @@ impl Cli {
                         system,
                         empty,
                         duplicates,
+                        windows_update,
+                        event_logs,
                         project_age_days: config.thresholds.project_age_days,
                         min_age_days: config.thresholds.min_age_days,
                         min_size_bytes,
@@ -1112,6 +1168,8 @@ impl Cli {
                                 system,
                                 empty,
                                 duplicates,
+                                windows_update: false,
+                                event_logs: false,
                                 project_age_days: config.thresholds.project_age_days,
                                 min_age_days: config.thresholds.min_age_days,
                                 min_size_bytes,
@@ -1597,6 +1655,96 @@ impl Cli {
                         }
                     }
                 }
+                Commands::Startup {
+                    list: _,
+                    disable,
+                    enable,
+                    json,
+                } => {
+                    use crate::categories::startup;
+
+                    if let Some(name) = disable {
+                        let programs = startup::list_startup_programs()?;
+                        if let Some(program) = programs.iter().find(|p| p.name == name) {
+                            startup::disable_startup_program(program)?;
+                            if !json {
+                                println!(
+                                    "{} Disabled startup program: {}",
+                                    Theme::success("✓"),
+                                    Theme::value(&name)
+                                );
+                            }
+                        } else {
+                            return Err(anyhow::anyhow!("Startup program not found: {}", name));
+                        }
+                    } else if let Some(name) = enable {
+                        let programs = startup::list_startup_programs()?;
+                        if let Some(program) = programs.iter().find(|p| p.name == name) {
+                            startup::enable_startup_program(program)?;
+                            if !json {
+                                println!(
+                                    "{} Enabled startup program: {}",
+                                    Theme::success("✓"),
+                                    Theme::value(&name)
+                                );
+                            }
+                        } else {
+                            return Err(anyhow::anyhow!("Startup program not found: {}", name));
+                        }
+                    } else {
+                        // List all startup programs
+                        let programs = startup::list_startup_programs()?;
+
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&programs)?);
+                        } else {
+                            println!();
+                            println!("{}", Theme::header("Windows Startup Programs"));
+                            println!("{}", Theme::divider_bold(60));
+                            println!();
+
+                            if programs.is_empty() {
+                                println!("{}", Theme::muted("No startup programs found."));
+                            } else {
+                                println!(
+                                    "{:<30} {:<50} {:<15} {:<10}",
+                                    Theme::primary("Name"),
+                                    Theme::primary("Command"),
+                                    Theme::primary("Location"),
+                                    Theme::primary("Impact")
+                                );
+                                println!("{}", Theme::divider(60));
+
+                                for program in &programs {
+                                    let impact_str = program.impact.as_str();
+                                    let location_short = if program.location.len() > 45 {
+                                        format!("{}...", &program.location[..42])
+                                    } else {
+                                        program.location.clone()
+                                    };
+                                    println!(
+                                        "{:<30} {:<50} {:<15} {:<10}",
+                                        Theme::value(&program.name),
+                                        Theme::muted(&program.command),
+                                        Theme::muted(&location_short),
+                                        Theme::category(impact_str)
+                                    );
+                                }
+
+                                println!();
+                                println!(
+                                    "{} Use {} to disable or {} to enable a program",
+                                    Theme::muted("→"),
+                                    Theme::command("wole startup --disable <name>"),
+                                    Theme::command("wole startup --enable <name>")
+                                );
+                            }
+                            println!();
+                        }
+                    }
+
+                    Ok(())
+                }
             },
         }
     }
@@ -1617,6 +1765,8 @@ pub struct ScanOptions {
     pub system: bool,
     pub empty: bool,
     pub duplicates: bool,
+    pub windows_update: bool,
+    pub event_logs: bool,
     pub project_age_days: u64,
     pub min_age_days: u64,
     pub min_size_bytes: u64,

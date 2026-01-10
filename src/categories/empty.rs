@@ -176,6 +176,9 @@ fn should_skip_entry(entry: &walkdir::DirEntry) -> bool {
 
 /// Clean (delete) an empty folder by moving it to the Recycle Bin
 pub fn clean(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
     trash::delete(path)
         .with_context(|| format!("Failed to delete empty folder: {}", path.display()))?;
     Ok(())

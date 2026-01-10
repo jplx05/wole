@@ -777,7 +777,15 @@ fn convert_category_result(
         .into_iter()
         .filter(|path| !config.is_excluded(path))
         .map(|path| {
-            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            // For Installed Applications we already computed real folder sizes during the scan
+            // (registry EstimatedSize or a directory walk). `metadata.len()` is not meaningful
+            // for directories on Windows and will show tiny values (e.g. 4 KiB).
+            let size = if category == Category::Applications {
+                crate::categories::applications::get_app_size(&path)
+                    .unwrap_or_else(|| std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0))
+            } else {
+                std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+            };
             let is_directory = path.is_dir();
             CleanableFile {
                 path,

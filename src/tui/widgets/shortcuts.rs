@@ -87,8 +87,8 @@ pub fn get_shortcuts(
             if app_state.map(|s| s.search_mode).unwrap_or(false) {
                 vec![
                     ("Type", "Search"),
-                    ("Enter", "Confirm"),
-                    ("Esc", "Cancel"),
+                    ("Enter", "Done"),
+                    ("Esc", "Exit search"),
                     ("↑↓", "Navigate"),
                 ]
             } else if app_state
@@ -96,25 +96,25 @@ pub fn get_shortcuts(
                 .unwrap_or(false)
             {
                 vec![
+                    ("Space", "select/deselect"),
+                    ("C", "Delete selected"),
                     ("/", "Search"),
-                    ("Esc", "Clear Filter"),
                     ("↑↓", "Navigate"),
                     ("Tab", "Next Category"),
-                    ("Space", "Toggle"),
-                    ("Enter", "Open File/Expand"),
-                    ("Ctrl+Enter", "Toggle All"),
-                    ("C", "Clean Selected"),
+                    ("Enter", "open"),
+                    ("Ctrl+Enter", "Collapse group..."),
+                    ("Esc", "Clear Filter"),
                     ("Q", "Quit"),
                 ]
             } else {
                 vec![
+                    ("Space", "select/deselect"),
+                    ("C", "Delete selected"),
                     ("/", "Search"),
                     ("↑↓", "Navigate"),
                     ("Tab", "Next Category"),
-                    ("Space", "Toggle"),
-                    ("Enter", "Open File/Expand"),
-                    ("Ctrl+Enter", "Toggle All"),
-                    ("C", "Clean Selected"),
+                    ("Enter", "open"),
+                    ("Ctrl+Enter", "Collapse group..."),
                     ("Esc", "Back"),
                     ("Q", "Quit"),
                 ]

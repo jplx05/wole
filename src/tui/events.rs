@@ -863,17 +863,23 @@ fn handle_results_event(
     if app_state.search_mode {
         match key {
             KeyCode::Esc => {
-                // Exit search mode, clear query
+                // Exit search mode, keep query active
                 app_state.search_mode = false;
-                app_state.search_query.clear();
                 app_state.cursor = 0;
                 app_state.scroll_offset = 0;
                 return EventResult::Continue;
             }
             KeyCode::Enter => {
-                // Confirm search, stay in results with filter active
-                app_state.search_mode = false;
-                return EventResult::Continue;
+                // Check for Ctrl+Enter first - allow it to fall through to sibling collapse handler
+                if modifiers.contains(KeyModifiers::CONTROL) {
+                    // Exit search mode first so Ctrl+Enter handler can work
+                    app_state.search_mode = false;
+                    // Fall through to normal handling below
+                } else {
+                    // Regular Enter - confirm search, stay in results with filter active
+                    app_state.search_mode = false;
+                    return EventResult::Continue;
+                }
             }
             KeyCode::Backspace => {
                 app_state.search_query.pop();
@@ -1039,6 +1045,7 @@ fn handle_results_event(
                     crate::tui::state::ResultsRow::FolderHeader {
                         group_idx,
                         folder_idx,
+                        ..
                     } => {
                         if let Some(group) = app_state.category_groups.get_mut(group_idx) {
                             if let Some(folder) = group.folder_groups.get_mut(folder_idx) {
@@ -1069,6 +1076,7 @@ fn handle_results_event(
                     crate::tui::state::ResultsRow::FolderHeader {
                         group_idx,
                         folder_idx,
+                        ..
                     } => {
                         // If expanded, collapse
                         let mut collapsed_now = false;
@@ -1102,7 +1110,7 @@ fn handle_results_event(
                             }
                         }
                     }
-                    crate::tui::state::ResultsRow::Item { item_idx: _ } => {
+                    crate::tui::state::ResultsRow::Item { .. } => {
                         // Find parent header (Folder or Category)
                         // Search backwards for the first header
                         for i in (0..app_state.cursor).rev() {
@@ -1235,12 +1243,13 @@ fn handle_results_event(
             };
 
             match *row {
-                crate::tui::state::ResultsRow::Item { item_idx } => {
+                crate::tui::state::ResultsRow::Item { item_idx, .. } => {
                     app_state.toggle_items([item_idx]);
                 }
                 crate::tui::state::ResultsRow::FolderHeader {
                     group_idx,
                     folder_idx,
+                    ..
                 } => {
                     let items = app_state.folder_item_indices(group_idx, folder_idx);
                     app_state.toggle_items(items);
@@ -1254,12 +1263,169 @@ fn handle_results_event(
 
             EventResult::Continue
         }
-        KeyCode::Enter => {
-            // Check for Ctrl+Enter to expand/collapse sibling groups
+        KeyCode::Enter | KeyCode::Char('m') | KeyCode::Char('j') => {
+            // Check for Ctrl+Enter to expand/collapse sibling groups.
+            //
+            // NOTE: On some terminals Ctrl+Enter is reported as Ctrl+M / Ctrl+J.
             if modifiers.contains(KeyModifiers::CONTROL) {
                 let Some(row) = rows.get(app_state.cursor) else {
                     return EventResult::Continue;
                 };
+
+                fn toggle_sibling_folders_at_context(
+                    app_state: &mut AppState,
+                    rows: &[crate::tui::state::ResultsRow],
+                    cursor: usize,
+                ) {
+                    use crate::tui::state::ResultsRow;
+                    use std::collections::HashMap;
+
+                    // Compute the current category bounds (or whole list if headers are skipped).
+                    let mut group_idx: usize = 0;
+                    let mut start: usize = 0;
+                    for i in (0..=cursor).rev() {
+                        if let ResultsRow::CategoryHeader { group_idx: g } = rows[i] {
+                            group_idx = g;
+                            start = i + 1;
+                            break;
+                        }
+                    }
+                    let mut end: usize = rows.len();
+                    for i in (cursor + 1)..rows.len() {
+                        if matches!(rows[i], ResultsRow::CategoryHeader { .. }) {
+                            end = i;
+                            break;
+                        }
+                    }
+
+                    // Build a parent map for folder headers inside this category slice.
+                    // This avoids brittle backward scans when folder rows are interleaved with items.
+                    let mut parent_by_row: HashMap<usize, Option<usize>> = HashMap::new();
+                    let mut folder_idx_by_row: HashMap<usize, usize> = HashMap::new();
+                    let mut depth_by_row: HashMap<usize, usize> = HashMap::new();
+                    let mut last_folder_at_depth: Vec<Option<usize>> = Vec::new(); // folder_idx by depth
+
+                    for row_i in start..end {
+                        let ResultsRow::FolderHeader {
+                            group_idx: g,
+                            folder_idx,
+                            depth,
+                        } = rows[row_i]
+                        else {
+                            continue;
+                        };
+                        if g != group_idx {
+                            continue;
+                        }
+
+                        if last_folder_at_depth.len() <= depth {
+                            last_folder_at_depth.resize(depth + 1, None);
+                        }
+                        let parent = if depth == 0 {
+                            None
+                        } else {
+                            last_folder_at_depth.get(depth - 1).copied().flatten()
+                        };
+
+                        parent_by_row.insert(row_i, parent);
+                        folder_idx_by_row.insert(row_i, folder_idx);
+                        depth_by_row.insert(row_i, depth);
+
+                        last_folder_at_depth[depth] = Some(folder_idx);
+                        last_folder_at_depth.truncate(depth + 1);
+                    }
+
+                    // Determine which sibling folder "level" to toggle.
+                    // - On a folder header: toggle that folder's siblings (same depth, same parent).
+                    // - On an item:
+                    //   - Find the parent folder header (depth-1).
+                    //   - If that parent is a root folder (depth 0), toggle its *child* folders (depth 1).
+                    //   - Otherwise, toggle the parent folder's siblings (same depth as parent, same parent).
+                    let (target_depth, target_parent_folder_idx): (usize, Option<usize>) =
+                        match rows.get(cursor).copied() {
+                            Some(ResultsRow::FolderHeader {
+                                group_idx: g,
+                                depth,
+                                ..
+                            }) if g == group_idx => {
+                                let parent = parent_by_row.get(&cursor).copied().unwrap_or(None);
+                                (depth, parent)
+                            }
+                            Some(ResultsRow::Item { depth: item_depth, .. }) if item_depth > 0 => {
+                                let want_parent_depth = item_depth - 1;
+                                let mut parent_row: Option<usize> = None;
+                                for i in (start..cursor).rev() {
+                                    let ResultsRow::FolderHeader {
+                                        group_idx: g,
+                                        depth,
+                                        ..
+                                    } = rows[i]
+                                    else {
+                                        continue;
+                                    };
+                                    if g == group_idx && depth == want_parent_depth {
+                                        parent_row = Some(i);
+                                        break;
+                                    }
+                                }
+                                let Some(parent_row) = parent_row else {
+                                    return;
+                                };
+
+                                let parent_folder_idx =
+                                    folder_idx_by_row.get(&parent_row).copied().unwrap_or(0);
+                                let parent_depth = depth_by_row.get(&parent_row).copied().unwrap_or(0);
+                                let parent_parent =
+                                    parent_by_row.get(&parent_row).copied().unwrap_or(None);
+
+                                if parent_depth == 0 {
+                                    // Item is directly under a root folder: toggle sibling folders under that root.
+                                    (1, Some(parent_folder_idx))
+                                } else {
+                                    // Item is under a nested folder: toggle that folder's siblings.
+                                    (parent_depth, parent_parent)
+                                }
+                            }
+                            _ => return,
+                        };
+
+                    // Collect sibling folder indices at the target level.
+                    let mut siblings: Vec<usize> = Vec::new();
+                    for row_i in start..end {
+                        let ResultsRow::FolderHeader {
+                            group_idx: g,
+                            folder_idx,
+                            depth,
+                        } = rows[row_i]
+                        else {
+                            continue;
+                        };
+                        if g != group_idx || depth != target_depth {
+                            continue;
+                        }
+                        let parent = parent_by_row.get(&row_i).copied().unwrap_or(None);
+                        if parent == target_parent_folder_idx {
+                            siblings.push(folder_idx);
+                        }
+                    }
+
+                    if siblings.is_empty() {
+                        return;
+                    }
+
+                    if let Some(group) = app_state.category_groups.get_mut(group_idx) {
+                        let any_expanded = siblings
+                            .iter()
+                            .filter_map(|&idx| group.folder_groups.get(idx))
+                            .any(|f| f.expanded);
+                        let new_state = !any_expanded;
+                        for &idx in &siblings {
+                            if let Some(f) = group.folder_groups.get_mut(idx) {
+                                f.expanded = new_state;
+                            }
+                        }
+                    }
+                }
 
                 // Expand/collapse sibling groups based on current row
                 match *row {
@@ -1272,56 +1438,25 @@ fn handle_results_event(
                         }
                     }
                     crate::tui::state::ResultsRow::FolderHeader {
-                        group_idx,
+                        group_idx: _,
                         folder_idx: _,
+                        ..
                     } => {
-                        // Expand/collapse all sibling folders in the same category
-                        if let Some(group) = app_state.category_groups.get_mut(group_idx) {
-                            // Determine the current state (if any sibling folder is expanded, collapse all; otherwise expand all)
-                            let any_expanded = group.folder_groups.iter().any(|f| f.expanded);
-                            for folder in &mut group.folder_groups {
-                                folder.expanded = !any_expanded;
-                            }
-                        }
+                        toggle_sibling_folders_at_context(app_state, &rows, app_state.cursor);
                     }
-                    crate::tui::state::ResultsRow::Item { item_idx: _ } => {
-                        // Find the parent folder or category and expand/collapse siblings
-                        // Search backwards to find the folder header or category header
-                        let mut category_group_idx = None;
-                        let mut folder_idx = None;
-
-                        for i in (0..=app_state.cursor).rev() {
-                            if let Some(r) = rows.get(i) {
-                                match *r {
-                                    crate::tui::state::ResultsRow::FolderHeader {
-                                        group_idx,
-                                        folder_idx: f_idx,
-                                    } => {
-                                        category_group_idx = Some(group_idx);
-                                        folder_idx = Some(f_idx);
-                                        break;
-                                    }
-                                    crate::tui::state::ResultsRow::CategoryHeader { group_idx } => {
-                                        category_group_idx = Some(group_idx);
-                                        break;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-
-                        if let Some(group_idx) = category_group_idx {
-                            if let Some(_f_idx) = folder_idx {
-                                // Item is under a folder - expand/collapse all sibling folders
-                                if let Some(group) = app_state.category_groups.get_mut(group_idx) {
-                                    let any_expanded =
-                                        group.folder_groups.iter().any(|f| f.expanded);
-                                    for folder in &mut group.folder_groups {
-                                        folder.expanded = !any_expanded;
-                                    }
-                                }
+                    crate::tui::state::ResultsRow::Item { .. } => {
+                        // If the item is in a folder, toggle that folder's siblings.
+                        // Otherwise, toggle sibling categories.
+                        if let Some(crate::tui::state::ResultsRow::Item { depth, .. }) =
+                            rows.get(app_state.cursor).copied()
+                        {
+                            if depth > 0 {
+                                toggle_sibling_folders_at_context(
+                                    app_state,
+                                    &rows,
+                                    app_state.cursor,
+                                );
                             } else {
-                                // Item is directly under category - expand/collapse all sibling categories
                                 let any_expanded =
                                     app_state.category_groups.iter().any(|g| g.expanded);
                                 for group in &mut app_state.category_groups {
@@ -1335,13 +1470,18 @@ fn handle_results_event(
                 return EventResult::Continue;
             }
 
-            // Regular Enter (without Ctrl) - expand/collapse groups
+            // Regular Enter (without Ctrl) - expand/collapse groups.
+            // (For Ctrl+M / Ctrl+J without Ctrl modifier, do nothing.)
+            if !matches!(key, KeyCode::Enter) {
+                return EventResult::Continue;
+            }
+
             let Some(row) = rows.get(app_state.cursor) else {
                 return EventResult::Continue;
             };
 
             match *row {
-                crate::tui::state::ResultsRow::Item { item_idx } => {
+                crate::tui::state::ResultsRow::Item { item_idx, .. } => {
                     // Open the file in the system's default application
                     if let Some(item) = app_state.all_items.get(item_idx) {
                         open_file(&item.path);
@@ -1350,6 +1490,7 @@ fn handle_results_event(
                 crate::tui::state::ResultsRow::FolderHeader {
                     group_idx,
                     folder_idx,
+                    ..
                 } => {
                     if let Some(group) = app_state.category_groups.get_mut(group_idx) {
                         if let Some(folder) = group.folder_groups.get_mut(folder_idx) {
@@ -1552,6 +1693,7 @@ fn handle_confirm_event(
                     crate::tui::state::ConfirmRow::FolderHeader {
                         cat_idx,
                         folder_idx,
+                        ..
                     } => {
                         let confirm_groups = app_state.confirm_category_groups();
                         if let Some(group) = confirm_groups.get(cat_idx) {
@@ -1585,6 +1727,7 @@ fn handle_confirm_event(
                     crate::tui::state::ConfirmRow::FolderHeader {
                         cat_idx,
                         folder_idx,
+                        ..
                     } => {
                         let confirm_groups = app_state.confirm_category_groups();
                         let mut collapsed_now = false;
@@ -1619,7 +1762,7 @@ fn handle_confirm_event(
                             }
                         }
                     }
-                    crate::tui::state::ConfirmRow::Item { item_idx: _ } => {
+                    crate::tui::state::ConfirmRow::Item { .. } => {
                         // Find parent header (Folder or Category)
                         // Search backwards for the first header
                         for i in (0..app_state.cursor).rev() {
@@ -1648,13 +1791,14 @@ fn handle_confirm_event(
             };
 
             match *row {
-                crate::tui::state::ConfirmRow::Item { item_idx } => {
+                crate::tui::state::ConfirmRow::Item { item_idx, .. } => {
                     // Toggle selection - item stays visible, checkbox updates
                     app_state.toggle_items([item_idx]);
                 }
                 crate::tui::state::ConfirmRow::FolderHeader {
                     cat_idx,
                     folder_idx,
+                    ..
                 } => {
                     // Toggle all items in this folder
                     let confirm_groups = app_state.confirm_category_groups();
@@ -1687,8 +1831,10 @@ fn handle_confirm_event(
 
             EventResult::Continue
         }
-        KeyCode::Enter => {
-            // Check for Ctrl+Enter to expand/collapse sibling groups
+        KeyCode::Enter | KeyCode::Char('m') | KeyCode::Char('j') => {
+            // Check for Ctrl+Enter to expand/collapse sibling groups.
+            //
+            // NOTE: On some terminals Ctrl+Enter is reported as Ctrl+M / Ctrl+J.
             if modifiers.contains(KeyModifiers::CONTROL) {
                 let Some(row) = rows.get(app_state.cursor) else {
                     return EventResult::Continue;
@@ -1708,108 +1854,172 @@ fn handle_confirm_event(
                             cached_group.expanded = !any_expanded;
                         }
                     }
-                    crate::tui::state::ConfirmRow::FolderHeader {
-                        cat_idx,
-                        folder_idx: _,
-                    } => {
-                        // Expand/collapse all sibling folders in the same category
-                        let confirm_groups = app_state.confirm_category_groups();
-                        if let Some(group) = confirm_groups.get(cat_idx) {
-                            // Find the category group and expand/collapse all sibling folders
-                            if let Some(category_group) = app_state
-                                .category_groups
-                                .iter_mut()
-                                .find(|g| g.name == group.name)
-                            {
-                                // Determine the current state (if any sibling folder is expanded, collapse all; otherwise expand all)
-                                let any_expanded =
-                                    category_group.folder_groups.iter().any(|f| f.expanded);
-                                for folder in &mut category_group.folder_groups {
-                                    folder.expanded = !any_expanded;
-                                }
-                                // Update cache in place to preserve ordering
-                                if let Some(cached_group) = app_state
-                                    .confirm_groups_cache
-                                    .iter_mut()
-                                    .find(|g| g.name == group.name)
-                                {
-                                    for cached_folder in &mut cached_group.folder_groups {
-                                        cached_folder.expanded = !any_expanded;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    crate::tui::state::ConfirmRow::Item { item_idx: _ } => {
-                        // Find the parent folder or category and expand/collapse siblings
-                        // Search backwards to find the folder header or category header
-                        let mut category_name = None;
-                        let mut folder_name = None;
+                    crate::tui::state::ConfirmRow::FolderHeader { .. }
+                    | crate::tui::state::ConfirmRow::Item { .. } => {
+                        // Match Results behavior: toggle *sibling folder groups* at the correct level
+                        // (works even when folders/files are interleaved).
+                        use crate::tui::state::ConfirmRow;
+                        use std::collections::HashMap;
 
+                        // Determine the current category slice bounds (or whole list if headers are skipped).
+                        let mut cat_idx: usize = 0;
+                        let mut start: usize = 0;
                         for i in (0..=app_state.cursor).rev() {
-                            if let Some(r) = rows.get(i) {
-                                match *r {
-                                    crate::tui::state::ConfirmRow::FolderHeader {
-                                        cat_idx,
-                                        folder_idx,
-                                    } => {
-                                        let confirm_groups = app_state.confirm_category_groups();
-                                        if let Some(group) = confirm_groups.get(cat_idx) {
-                                            if let Some(folder) =
-                                                group.folder_groups.get(folder_idx)
-                                            {
-                                                category_name = Some(group.name.clone());
-                                                folder_name = Some(folder.folder_name.clone());
-                                            }
-                                        }
-                                        break;
-                                    }
-                                    crate::tui::state::ConfirmRow::CategoryHeader { cat_idx } => {
-                                        let confirm_groups = app_state.confirm_category_groups();
-                                        if let Some(group) = confirm_groups.get(cat_idx) {
-                                            category_name = Some(group.name.clone());
-                                        }
-                                        break;
-                                    }
-                                    _ => {}
-                                }
+                            if let ConfirmRow::CategoryHeader { cat_idx: c } = rows[i] {
+                                cat_idx = c;
+                                start = i + 1;
+                                break;
+                            }
+                        }
+                        let mut end: usize = rows.len();
+                        for i in (app_state.cursor + 1)..rows.len() {
+                            if matches!(rows[i], ConfirmRow::CategoryHeader { .. }) {
+                                end = i;
+                                break;
                             }
                         }
 
-                        if let Some(cat_name) = category_name {
-                            if folder_name.is_some() {
-                                // Item is under a folder - expand/collapse all sibling folders
-                                if let Some(group) = app_state
-                                    .category_groups
-                                    .iter_mut()
-                                    .find(|g| g.name == cat_name)
+                        // Build parent map for folder headers within this category slice.
+                        let mut parent_by_row: HashMap<usize, Option<usize>> = HashMap::new();
+                        let mut folder_idx_by_row: HashMap<usize, usize> = HashMap::new();
+                        let mut depth_by_row: HashMap<usize, usize> = HashMap::new();
+                        let mut last_folder_at_depth: Vec<Option<usize>> = Vec::new();
+
+                        for row_i in start..end {
+                            let ConfirmRow::FolderHeader {
+                                cat_idx: c,
+                                folder_idx,
+                                depth,
+                            } = rows[row_i]
+                            else {
+                                continue;
+                            };
+                            if c != cat_idx {
+                                continue;
+                            }
+
+                            if last_folder_at_depth.len() <= depth {
+                                last_folder_at_depth.resize(depth + 1, None);
+                            }
+                            let parent = if depth == 0 {
+                                None
+                            } else {
+                                last_folder_at_depth.get(depth - 1).copied().flatten()
+                            };
+
+                            parent_by_row.insert(row_i, parent);
+                            folder_idx_by_row.insert(row_i, folder_idx);
+                            depth_by_row.insert(row_i, depth);
+
+                            last_folder_at_depth[depth] = Some(folder_idx);
+                            last_folder_at_depth.truncate(depth + 1);
+                        }
+
+                        // Determine which sibling folder "level" to toggle.
+                        let (target_depth, target_parent_folder_idx): (usize, Option<usize>) =
+                            match rows.get(app_state.cursor).copied() {
+                                Some(ConfirmRow::FolderHeader {
+                                    cat_idx: c,
+                                    depth,
+                                    ..
+                                }) if c == cat_idx => {
+                                    let parent =
+                                        parent_by_row.get(&app_state.cursor).copied().unwrap_or(None);
+                                    (depth, parent)
+                                }
+                                Some(ConfirmRow::Item { depth: item_depth, .. })
+                                    if item_depth > 0 =>
                                 {
-                                    let any_expanded =
-                                        group.folder_groups.iter().any(|f| f.expanded);
-                                    for folder in &mut group.folder_groups {
-                                        folder.expanded = !any_expanded;
-                                    }
-                                    // Update cache in place to preserve ordering
-                                    if let Some(cached_group) = app_state
-                                        .confirm_groups_cache
-                                        .iter_mut()
-                                        .find(|g| g.name == cat_name)
-                                    {
-                                        for cached_folder in &mut cached_group.folder_groups {
-                                            cached_folder.expanded = !any_expanded;
+                                    let want_parent_depth = item_depth - 1;
+                                    let mut parent_row: Option<usize> = None;
+                                    for i in (start..app_state.cursor).rev() {
+                                        let ConfirmRow::FolderHeader { cat_idx: c, depth, .. } =
+                                            rows[i]
+                                        else {
+                                            continue;
+                                        };
+                                        if c == cat_idx && depth == want_parent_depth {
+                                            parent_row = Some(i);
+                                            break;
                                         }
                                     }
+                                    let Some(parent_row) = parent_row else {
+                                        return EventResult::Continue;
+                                    };
+
+                                    let parent_folder_idx =
+                                        folder_idx_by_row.get(&parent_row).copied().unwrap_or(0);
+                                    let parent_depth =
+                                        depth_by_row.get(&parent_row).copied().unwrap_or(0);
+                                    let parent_parent =
+                                        parent_by_row.get(&parent_row).copied().unwrap_or(None);
+
+                                    if parent_depth == 0 {
+                                        // Item directly under a root folder: toggle child folders under that root.
+                                        (1, Some(parent_folder_idx))
+                                    } else {
+                                        // Item under nested folder: toggle that folder's siblings.
+                                        (parent_depth, parent_parent)
+                                    }
                                 }
-                            } else {
-                                // Item is directly under category - expand/collapse all sibling categories
-                                let any_expanded =
-                                    app_state.category_groups.iter().any(|g| g.expanded);
-                                for group in &mut app_state.category_groups {
-                                    group.expanded = !any_expanded;
+                                _ => return EventResult::Continue,
+                            };
+
+                        // Collect sibling folder indices at the target level.
+                        let mut siblings: Vec<usize> = Vec::new();
+                        for row_i in start..end {
+                            let ConfirmRow::FolderHeader {
+                                cat_idx: c,
+                                folder_idx,
+                                depth,
+                            } = rows[row_i]
+                            else {
+                                continue;
+                            };
+                            if c != cat_idx || depth != target_depth {
+                                continue;
+                            }
+                            let parent = parent_by_row.get(&row_i).copied().unwrap_or(None);
+                            if parent == target_parent_folder_idx {
+                                siblings.push(folder_idx);
+                            }
+                        }
+                        if siblings.is_empty() {
+                            return EventResult::Continue;
+                        }
+
+                        // Toggle in confirm cache (render source) and mirror to category_groups.
+                        if let Some(cached_group) = app_state.confirm_groups_cache.get_mut(cat_idx) {
+                            let any_expanded = siblings
+                                .iter()
+                                .filter_map(|&idx| cached_group.folder_groups.get(idx))
+                                .any(|f| f.expanded);
+                            let new_state = !any_expanded;
+
+                            // Update cache first (what the screen renders)
+                            for &idx in &siblings {
+                                if let Some(f) = cached_group.folder_groups.get_mut(idx) {
+                                    f.expanded = new_state;
                                 }
-                                // Update cache in place to preserve ordering
-                                for cached_group in &mut app_state.confirm_groups_cache {
-                                    cached_group.expanded = !any_expanded;
+                            }
+
+                            // Mirror to backing category_groups by matching folder_name
+                            let cat_name = cached_group.name.clone();
+                            if let Some(orig_group) = app_state.category_groups.iter_mut().find(|g| g.name == cat_name) {
+                                for &idx in &siblings {
+                                    if let Some(folder_name) = cached_group
+                                        .folder_groups
+                                        .get(idx)
+                                        .map(|f| f.folder_name.clone())
+                                    {
+                                        if let Some(orig_folder) = orig_group
+                                            .folder_groups
+                                            .iter_mut()
+                                            .find(|f| f.folder_name == folder_name)
+                                        {
+                                            orig_folder.expanded = new_state;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1819,7 +2029,12 @@ fn handle_confirm_event(
                 return EventResult::Continue;
             }
 
-            // Regular Enter (without Ctrl) - toggle expansion for category or folder headers
+            // Regular Enter (without Ctrl) - toggle expansion for category or folder headers.
+            // (For Ctrl+M / Ctrl+J without Ctrl modifier, do nothing.)
+            if !matches!(key, KeyCode::Enter) {
+                return EventResult::Continue;
+            }
+
             let Some(row) = rows.get(app_state.cursor) else {
                 return EventResult::Continue;
             };
@@ -1835,6 +2050,7 @@ fn handle_confirm_event(
                 crate::tui::state::ConfirmRow::FolderHeader {
                     cat_idx,
                     folder_idx,
+                    ..
                 } => {
                     // Toggle folder expansion
                     let confirm_groups = app_state.confirm_category_groups();
@@ -2525,6 +2741,13 @@ fn handle_status_event(
                         eprintln!("Failed to refresh system status: {}", e);
                     }
                 }
+                EventResult::Continue
+            }
+            #[cfg(windows)]
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                // Refresh disk breakdown in background
+                use crate::status::refresh_disk_breakdown_async;
+                refresh_disk_breakdown_async();
                 EventResult::Continue
             }
             _ => EventResult::Continue,

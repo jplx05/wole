@@ -37,6 +37,21 @@ pub fn get_root_disk_path() -> PathBuf {
     }
 }
 
+/// Normalize a path for display (strip Windows long-path prefixes).
+pub fn display_path(path: &Path) -> String {
+    let path_str = path.to_string_lossy().to_string();
+    #[cfg(windows)]
+    {
+        if let Some(stripped) = path_str.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{}", stripped);
+        }
+        if let Some(stripped) = path_str.strip_prefix(r"\\?\") {
+            return stripped.to_string();
+        }
+    }
+    path_str
+}
+
 /// Convert to long path format for Windows (\\?\)
 ///
 /// Windows has a default path length limit of 260 characters (MAX_PATH).
@@ -243,6 +258,62 @@ pub fn calculate_dir_size(path: &Path) -> u64 {
         .for_each(|entry| {
             if let Ok(e) = entry {
                 if e.file_type().is_file() {
+                    if let Ok(meta) = e.metadata() {
+                        total.fetch_add(meta.len(), Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+
+    total.load(Ordering::Relaxed)
+}
+
+/// Calculate directory size and emit progress for each file visited.
+///
+/// Uses the same traversal rules as calculate_dir_size().
+pub fn calculate_dir_size_with_progress<F>(path: &Path, on_path: &F) -> u64
+where
+    F: Fn(&Path) + Sync,
+{
+    use jwalk::WalkDir;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const MAX_DEPTH: usize = 15;
+
+    let total = AtomicU64::new(0);
+
+    WalkDir::new(path)
+        .max_depth(MAX_DEPTH)
+        .follow_links(false)
+        .parallelism(jwalk::Parallelism::RayonDefaultPool {
+            busy_timeout: std::time::Duration::from_secs(1),
+        })
+        .process_read_dir(|_depth, _path, _state, children| {
+            // Skip directories we don't want to descend into
+            children.retain(|entry| {
+                if let Ok(ref e) = entry {
+                    if e.file_type().is_symlink() {
+                        return false;
+                    }
+                    if e.file_type().is_dir() {
+                        if let Some(name) = e.path().file_name() {
+                            let name_str = name.to_string_lossy();
+                            // Skip .git internals
+                            if name_str == ".git" {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                true
+            });
+        })
+        .into_iter()
+        .for_each(|entry| {
+            if let Ok(e) = entry {
+                if e.file_type().is_file() {
+                    let path = e.path();
+                    on_path(&path);
                     if let Ok(meta) = e.metadata() {
                         total.fetch_add(meta.len(), Ordering::Relaxed);
                     }
@@ -535,9 +606,29 @@ pub const SYSTEM_DIRS: &[&str] = &[
 ];
 
 /// Check if path contains a system directory
+///
+/// Only checks the first few Normal components (root-level directories) to avoid false positives.
+/// For example:
+/// - `C:\Windows\...` is a system path (blocked) ✓
+/// - `C:\Program Files\...` is a system path (blocked) ✓
+/// - `C:\Users\...\AppData\Local\Microsoft\Windows\Caches` is NOT a system path (should NOT be blocked) ✓
 pub fn is_system_path(path: &Path) -> bool {
+    let mut normal_component_count = 0;
+    // Only check the first 2 Normal components after the root
+    // This prevents false positives from paths like:
+    // C:\Users\jhppo\AppData\Local\Microsoft\Windows\Caches (should NOT be blocked)
+    // While still catching:
+    // C:\Windows\... (should be blocked - "Windows" is 1st Normal component)
+    // C:\Program Files\... (should be blocked - "Program Files" is 1st Normal component)
+    const MAX_NORMAL_COMPONENTS_TO_CHECK: usize = 2;
+
     for component in path.components() {
         if let std::path::Component::Normal(name) = component {
+            normal_component_count += 1;
+            if normal_component_count > MAX_NORMAL_COMPONENTS_TO_CHECK {
+                break;
+            }
+
             let name_str = name.to_string_lossy();
             if SYSTEM_DIRS
                 .iter()
@@ -621,12 +712,26 @@ mod tests {
         assert_eq!(is_system_path(windows_path2), has_program_files);
         assert!(!is_system_path(normal_path));
 
-        // Test with a path that definitely has a system directory
-        let test_path = Path::new("/some/path/Windows/system");
+        // Test with a path that definitely has a system directory at root level
+        let test_path = Path::new("/Windows/system");
         assert!(is_system_path(test_path));
 
-        let test_path2 = Path::new("/home/user/Program Files/app");
+        let test_path2 = Path::new("/Program Files/app");
         assert!(is_system_path(test_path2));
+
+        // Test false positive prevention: user cache directories with "Windows" in the path
+        // should NOT be blocked (this was the bug we fixed)
+        let user_cache_path = Path::new(r"C:\Users\jhppo\AppData\Local\Microsoft\Windows\Caches");
+        assert!(
+            !is_system_path(user_cache_path),
+            "User cache directory should not be blocked"
+        );
+
+        let user_explorer_path = Path::new(r"C:\Users\me\AppData\Local\Microsoft\Windows\Explorer");
+        assert!(
+            !is_system_path(user_explorer_path),
+            "User Explorer directory should not be blocked"
+        );
     }
 
     #[test]
