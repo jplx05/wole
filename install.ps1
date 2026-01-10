@@ -267,22 +267,69 @@ try {
             Write-Host "⚠ Warning: Executable seems too small ($fileSize bytes) - download may have failed" -ForegroundColor Yellow
         }
         
-        # Check for VC++ runtime DLLs before trying to run
+        # Check for VC++ 2015-2022 Runtime using registry (more reliable than DLL checks)
         $missingVCRuntime = $false
-        $system32Path = if ([System.Environment]::Is64BitOperatingSystem) { 
-            "$env:SystemRoot\System32" 
-        } else { 
-            "$env:SystemRoot\System32" 
+        
+        # Determine which architecture we need based on the wole.exe we installed
+        $vcArchKey = "x64"  # Default to x64
+        if ($ARCH -eq "i686") { $vcArchKey = "x86" }
+        elseif ($ARCH -eq "arm64") { $vcArchKey = "arm64" }
+        
+        # Check registry for installed VC++ 2015-2022 Runtime
+        $vcRuntimeInstalled = $false
+        $registryPaths = @(
+            "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\$vcArchKey",
+            "HKLM:\SOFTWARE\Wow6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\$vcArchKey"
+        )
+        
+        foreach ($regPath in $registryPaths) {
+            if (Test-Path $regPath) {
+                try {
+                    $installed = Get-ItemProperty -Path $regPath -Name "Installed" -ErrorAction SilentlyContinue
+                    if ($installed -and $installed.Installed -eq 1) {
+                        $vcRuntimeInstalled = $true
+                        break
+                    }
+                } catch {
+                    # Registry key exists but no Installed value, continue checking
+                }
+            }
         }
-        $syswow64Path = "$env:SystemRoot\SysWOW64"
         
-        # Check for vcruntime140.dll in System32 or SysWOW64
-        $vcruntimeExists = (Test-Path "$system32Path\vcruntime140.dll") -or (Test-Path "$syswow64Path\vcruntime140.dll")
-        $msvcpExists = (Test-Path "$system32Path\msvcp140.dll") -or (Test-Path "$syswow64Path\msvcp140.dll")
+        # Also check Uninstall registry as fallback
+        if (-not $vcRuntimeInstalled) {
+            $uninstallPaths = @(
+                "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                "HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+            )
+            
+            foreach ($uninstallPath in $uninstallPaths) {
+                if (Test-Path $uninstallPath) {
+                    $keys = Get-ChildItem -Path $uninstallPath -ErrorAction SilentlyContinue
+                    foreach ($key in $keys) {
+                        try {
+                            $props = Get-ItemProperty -Path $key.PSPath -ErrorAction SilentlyContinue
+                            if ($props.DisplayName -like "*Microsoft Visual C++ 2015-2022 Redistributable*") {
+                                # Check if it matches our architecture
+                                if (($vcArchKey -eq "x64" -and $props.DisplayName -like "*x64*") -or
+                                    ($vcArchKey -eq "x86" -and $props.DisplayName -like "*x86*") -or
+                                    ($vcArchKey -eq "arm64" -and $props.DisplayName -like "*ARM64*")) {
+                                    $vcRuntimeInstalled = $true
+                                    break
+                                }
+                            }
+                        } catch {
+                            # Skip invalid keys
+                        }
+                    }
+                    if ($vcRuntimeInstalled) { break }
+                }
+            }
+        }
         
-        if (-not $vcruntimeExists -or -not $msvcpExists) {
+        if (-not $vcRuntimeInstalled) {
             $missingVCRuntime = $true
-            Write-Host "⚠ Missing Microsoft Visual C++ Runtime detected." -ForegroundColor Yellow
+            Write-Host "⚠ Missing Microsoft Visual C++ 2015-2022 Runtime ($vcArchKey) detected." -ForegroundColor Yellow
             Write-Host "  Installing it now (may prompt for admin approval)..." -ForegroundColor Yellow
         } else {
             # Try to actually run wole to verify it works
@@ -324,13 +371,9 @@ try {
         }
         
         if ($missingVCRuntime) {
-            # Choose the correct redistributable for the current arch
-            $vcArch = "x64"
-            if ($ARCH -eq "arm64") { $vcArch = "arm64" }
-            elseif ($ARCH -eq "i686") { $vcArch = "x86" }
-
-            $vcRedistUrl = "https://aka.ms/vs/17/release/vc_redist.${vcArch}.exe"
-            $vcRedistPath = Join-Path $TEMP_DIR "vc_redist.${vcArch}.exe"
+            # Use the architecture we already determined from registry check
+            $vcRedistUrl = "https://aka.ms/vs/17/release/vc_redist.${vcArchKey}.exe"
+            $vcRedistPath = Join-Path $TEMP_DIR "vc_redist.${vcArchKey}.exe"
 
             try {
                 Write-Host "Downloading VC++ Runtime from $vcRedistUrl..." -ForegroundColor Gray
