@@ -259,16 +259,38 @@ try {
     Write-Host ""
     if ($exeExists) {
         Write-Host "✓ wole installed successfully!" -ForegroundColor Green
-        if ($pathContainsDir) {
-            Write-Host "✓ PATH updated - wole should be available immediately" -ForegroundColor Green
+        
+        # Try to actually run wole to verify it works
+        $woleWorks = $false
+        try {
+            $null = & $TARGET_PATH --version 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $woleWorks = $true
+            }
+        } catch {
+            $woleWorks = $false
+        }
+        
+        if ($woleWorks) {
+            Write-Host "✓ wole is ready to use!" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "Run 'wole --help' to get started." -ForegroundColor Cyan
+            Write-Host ""
+            # Show a quick demo
+            Write-Host "Quick start:" -ForegroundColor White
+            Write-Host "  wole scan     - Scan for cleanable files" -ForegroundColor Gray
+            Write-Host "  wole clean    - Clean files interactively" -ForegroundColor Gray
+            Write-Host "  wole status   - Show system status" -ForegroundColor Gray
         } else {
-            Write-Host "⚠ PATH may need a terminal restart" -ForegroundColor Yellow
+            Write-Host "✓ PATH updated for future terminal sessions" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "To use wole now, either:" -ForegroundColor Yellow
+            Write-Host "  1. Open a NEW terminal window, then run: wole --help" -ForegroundColor White
+            Write-Host "  2. Or run directly: & `"$TARGET_PATH`" --help" -ForegroundColor White
         }
     } else {
         Write-Host "✗ Installation may have failed - executable not found" -ForegroundColor Red
     }
-    Write-Host ""
-    Write-Host "Run 'wole --help' to get started." -ForegroundColor Cyan
     
 } finally {
     # Cleanup
