@@ -25,6 +25,7 @@ pub fn create_progress_bar(total: u64, msg: &str) -> ProgressBar {
             .progress_chars("█▓░"),
     );
     pb.set_message(msg.to_string());
+    pb.enable_steady_tick(Duration::from_millis(100));
     pb
 }
 

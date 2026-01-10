@@ -82,6 +82,16 @@ pub struct UiSettings {
     /// Show current storage and storage after deletion in scan results (instead of just free space)
     #[serde(default = "default_false")]
     pub show_storage_info: bool,
+
+    /// Scan depth for user directory analysis (default: 8)
+    /// Higher values scan deeper but take longer
+    #[serde(default = "default_scan_depth_user")]
+    pub scan_depth_user: u8,
+
+    /// Scan depth for entire disk analysis (default: 10)
+    /// Higher values scan deeper but take longer
+    #[serde(default = "default_scan_depth_entire_disk")]
+    pub scan_depth_entire_disk: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -255,6 +265,8 @@ impl Default for UiSettings {
             animations: default_true(),
             refresh_rate_ms: default_refresh_rate(),
             show_storage_info: default_false(),
+            scan_depth_user: default_scan_depth_user(),
+            scan_depth_entire_disk: default_scan_depth_entire_disk(),
         }
     }
 }
@@ -349,6 +361,12 @@ fn default_memmap_threshold() -> u64 {
 fn default_duplicate_buffer_size() -> usize {
     8 * 1024 * 1024
 } // 8MB
+fn default_scan_depth_user() -> u8 {
+    8
+}
+fn default_scan_depth_entire_disk() -> u8 {
+    10
+}
 
 impl Config {
     /// Get the config file path: %APPDATA%\wole\config.toml

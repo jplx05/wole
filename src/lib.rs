@@ -19,4 +19,5 @@ pub mod scanner;
 pub mod size;
 pub mod theme;
 pub mod tui;
+pub mod uninstall;
 pub mod utils;

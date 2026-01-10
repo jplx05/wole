@@ -1,9 +1,11 @@
 use crate::config::Config;
 use crate::git;
-use crate::output::CategoryResult;
+use crate::output::{CategoryResult, OutputMode};
 use crate::project;
+use crate::theme::Theme;
 use crate::utils;
 use anyhow::{Context, Result};
+use bytesize;
 use chrono::{Duration, Utc};
 use std::env;
 use std::path::{Path, PathBuf};
@@ -23,7 +25,7 @@ const MIN_FILE_SIZE: u64 = 10 * 1024; // 10 KB
 /// - Skips files smaller than 10KB (reduces noise)
 /// - Sorts by size descending (biggest first)
 /// - Limits to top 200 results
-pub fn scan(_root: &Path, min_age_days: u64, config: &Config) -> Result<CategoryResult> {
+pub fn scan(_root: &Path, min_age_days: u64, config: &Config, output_mode: OutputMode) -> Result<CategoryResult> {
     let mut result = CategoryResult::default();
 
     let cutoff = Utc::now() - Duration::days(min_age_days as i64);
@@ -31,11 +33,19 @@ pub fn scan(_root: &Path, min_age_days: u64, config: &Config) -> Result<Category
     // Get user directories to scan
     let user_dirs = get_user_directories()?;
 
+    if output_mode != OutputMode::Quiet && !user_dirs.is_empty() {
+        println!("  {} Scanning {} directories for old files (older than {} days)...", 
+            Theme::muted("→"), user_dirs.len(), min_age_days);
+    }
+
     // Collect files with sizes for sorting
     let mut files_with_sizes: Vec<(PathBuf, u64)> = Vec::new();
 
-    for dir in user_dirs {
-        scan_directory(&dir, &cutoff, &mut files_with_sizes, config)?;
+    for dir in &user_dirs {
+        if output_mode != OutputMode::Quiet {
+            println!("    {} Scanning {}", Theme::muted("•"), dir.display());
+        }
+        scan_directory(dir, &cutoff, &mut files_with_sizes, config, output_mode)?;
     }
 
     // Sort by size descending (biggest first)
@@ -43,6 +53,29 @@ pub fn scan(_root: &Path, min_age_days: u64, config: &Config) -> Result<Category
 
     // Limit results
     files_with_sizes.truncate(MAX_RESULTS);
+
+    // Show found files
+    if output_mode != OutputMode::Quiet && !files_with_sizes.is_empty() {
+        println!("  {} Found {} old files:", Theme::muted("→"), files_with_sizes.len());
+        let show_count = match output_mode {
+            OutputMode::VeryVerbose => files_with_sizes.len(),
+            OutputMode::Verbose => files_with_sizes.len(),
+            OutputMode::Normal => 10.min(files_with_sizes.len()),
+            OutputMode::Quiet => 0,
+        };
+        
+        for (i, (path, size)) in files_with_sizes.iter().take(show_count).enumerate() {
+            let size_str = bytesize::to_string(*size, true);
+            println!("      {} {} ({})", Theme::muted("→"), path.display(), Theme::size(&size_str));
+            
+            if i == 9 && output_mode == OutputMode::Normal && files_with_sizes.len() > 10 {
+                println!("      {} ... and {} more (use -v to see all)", 
+                    Theme::muted("→"), 
+                    files_with_sizes.len() - 10);
+                break;
+            }
+        }
+    }
 
     // Build result
     for (path, size) in files_with_sizes {
@@ -79,6 +112,7 @@ fn scan_directory(
     cutoff: &chrono::DateTime<Utc>,
     files: &mut Vec<(PathBuf, u64)>,
     config: &Config,
+    _output_mode: OutputMode,
 ) -> Result<()> {
     if !dir.exists() {
         return Ok(());
@@ -165,20 +199,23 @@ fn scan_directory(
             continue;
         }
 
-        // Check age
-        if let Ok(modified) = metadata.modified() {
-            let modified_dt: chrono::DateTime<Utc> = modified.into();
-            if modified_dt < *cutoff {
-                // Skip files in active projects (using CACHED git lookup)
-                if let Some(project_root) = git::find_git_root_cached(&path) {
-                    if let Ok(true) = project::is_project_active(&project_root, 14) {
-                        continue;
+            // Check age
+            if let Ok(modified) = metadata.modified() {
+                let modified_dt: chrono::DateTime<Utc> = modified.into();
+                if modified_dt < *cutoff {
+                    // Skip files in active projects (using CACHED git lookup)
+                    // PERFORMANCE: Both find_git_root_cached and is_project_active are now cached
+                    if let Some(project_root) = git::find_git_root_cached(&path) {
+                        // Use project_age_days from config (defaults to 14 if not set)
+                        let project_age_days = config.thresholds.project_age_days;
+                        if let Ok(true) = project::is_project_active(&project_root, project_age_days) {
+                            continue;
+                        }
                     }
-                }
 
-                files.push((path, metadata.len()));
+                    files.push((path, metadata.len()));
+                }
             }
-        }
     }
 
     Ok(())

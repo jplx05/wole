@@ -75,9 +75,13 @@ pub enum Screen {
         cleaned_bytes: u64,
         errors: usize,
     },
+    RestoreSelection {
+        cursor: usize, // cursor for restore type selection
+    },
     Restore {
         progress: Option<RestoreProgress>,
         result: Option<RestoreResult>,
+        restore_all_bin: bool, // true = restore all bin, false = restore from last deletion
     },
     DiskInsights {
         insights: crate::disk_usage::DiskInsights,

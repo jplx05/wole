@@ -57,7 +57,7 @@ fn render_actions(f: &mut Frame, area: Rect, app_state: &AppState) {
         ("Scan", "Find cleanable files (safe, dry-run)"),
         ("Clean", "Delete selected files"),
         ("Analyze", "Explore disk usage (folder sizes)"),
-        ("Restore", "Restore files from last deletion"),
+        ("Restore", "Restore files from deletion or Recycle Bin"),
         ("Config", "View or modify settings"),
     ];
 

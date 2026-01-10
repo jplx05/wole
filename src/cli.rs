@@ -1,6 +1,37 @@
 use anyhow::Context;
 use clap::{ArgAction, Parser, Subcommand};
+use std::io::{self, Write};
 use std::path::PathBuf;
+
+/// Read a line from stdin, handling terminal focus loss issues on Windows.
+/// This function ensures stdin is properly synchronized and clears any stale input
+/// before reading, which fixes issues when the terminal loses and regains focus.
+/// 
+/// On Windows, when a terminal loses focus and regains it, stdin can be in a
+/// problematic state. This function ensures we get a fresh stdin handle each time,
+/// which helps resolve focus-related input issues.
+fn read_line_from_stdin() -> io::Result<String> {
+    // Flush stdout to ensure prompt is visible before reading
+    io::stdout().flush()?;
+    
+    // Always get a fresh stdin handle to avoid issues with stale locks
+    // This is especially important on Windows when the terminal loses focus
+    let mut input = String::new();
+    
+    // Use BufRead for better control and proper buffering
+    use std::io::BufRead;
+    
+    // Get a fresh stdin handle each time (don't reuse a locked handle)
+    // This ensures we're reading from the current terminal state
+    let stdin = io::stdin();
+    let mut handle = stdin.lock();
+    
+    // Read a line - this will block until the user types and presses Enter
+    // On Windows, getting a fresh handle helps when the terminal has lost focus
+    handle.read_line(&mut input)?;
+    
+    Ok(input)
+}
 
 use crate::cleaner;
 use crate::config::Config;
@@ -10,23 +41,25 @@ use crate::restore;
 use crate::scanner;
 use crate::size;
 use crate::theme::Theme;
+use crate::uninstall;
 
 #[derive(Parser)]
 #[command(name = "wole")]
 #[command(version)]
 #[command(about = "Reclaim disk space on Windows by cleaning unused files")]
-#[command(
-    long_about = "Wole is a developer-focused CLI tool that safely identifies and removes \
-    unused files to free up disk space.\n\n\
-    Interactive Mode:\n  \
-    wole                          # Launch interactive TUI mode\n  \
-    wole analyze --interactive    # Launch TUI for disk insights\n\n\
-    Examples:\n  \
-    wole scan --all              # Scan all categories\n  \
-    wole scan --cache --temp     # Scan specific categories\n  \
-    wole clean --all -y          # Clean all categories without confirmation\n  \
-    wole scan --large --min-size 500MB  # Find files over 500MB"
-)]
+    #[command(
+        long_about = "Wole is a developer-focused CLI tool that safely identifies and removes \
+        unused files to free up disk space.\n\n\
+        Interactive Mode:\n  \
+        wole                          # Launch interactive TUI mode\n  \
+        wole analyze --interactive    # Launch TUI for disk insights\n\n\
+        Examples:\n  \
+        wole scan --all              # Scan all categories\n  \
+        wole scan --cache --temp     # Scan specific categories\n  \
+        wole clean --all -y          # Clean all categories without confirmation\n  \
+        wole scan --large --min-size 500MB  # Find files over 500MB\n  \
+        wole remove                  # Uninstall wole from your system"
+    )]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -205,11 +238,15 @@ pub enum Commands {
         #[arg(long)]
         disk: bool,
 
+        /// Scan entire disk instead of user directory (only applies to disk insights mode)
+        #[arg(long)]
+        entire_disk: bool,
+
         /// Launch interactive TUI for disk insights
         #[arg(short = 'i', long)]
         interactive: bool,
 
-        /// Maximum depth to scan [default: 3]
+        /// Maximum depth to scan [default: 3, recommended: 10+ for entire disk]
         #[arg(long, default_value = "3", value_name = "DEPTH")]
         depth: u8,
 
@@ -323,6 +360,25 @@ pub enum Commands {
         /// Restore from a specific log file
         #[arg(long, value_name = "LOG_FILE")]
         from: Option<PathBuf>,
+
+        /// Restore all contents of the Recycle Bin in bulk (faster on Windows)
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Uninstall wole from your system
+    Remove {
+        /// Also remove config directory (%APPDATA%\wole)
+        #[arg(long)]
+        config: bool,
+
+        /// Also remove data directory (%LOCALAPPDATA%\wole, including history)
+        #[arg(long)]
+        data: bool,
+
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
     },
 }
 
@@ -382,6 +438,9 @@ impl Cli {
             "     {} Restore files from last deletion",
             Theme::muted("→")
         );
+        println!();
+        println!("  {}", Theme::command("remove"));
+        println!("     {} Uninstall wole from your system", Theme::muted("→"));
         println!();
         println!("{}", Theme::divider(60));
         println!();
@@ -489,28 +548,11 @@ impl Cli {
                 };
 
                 // Default to current directory to avoid stack overflow from OneDrive/UserDirs
-                // CRITICAL FIX: Use simple env var instead of directories crate which may cause stack overflow
+                // PERFORMANCE FIX: Avoid OneDrive paths which are very slow to scan on Windows
+                // Use current directory instead, which is faster and more predictable
                 let scan_path = path.unwrap_or_else(|| {
-                    if let Ok(userprofile) = std::env::var("USERPROFILE") {
-                        let base = PathBuf::from(&userprofile);
-
-                        // Try OneDrive\Documents first (common on Windows 11)
-                        let onedrive_docs = base.join("OneDrive").join("Documents");
-                        if onedrive_docs.exists() {
-                            return onedrive_docs;
-                        }
-
-                        // Try regular Documents
-                        let docs = base.join("Documents");
-                        if docs.exists() {
-                            return docs;
-                        }
-
-                        // Fallback to user profile root
-                        base
-                    } else {
-                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                    }
+                    // Use current directory as default - faster and avoids OneDrive sync issues
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                 });
 
                 // Load config first
@@ -530,25 +572,27 @@ impl Cli {
                 // Use config values (after CLI overrides) for scan options
                 let min_size_bytes = config.thresholds.min_size_mb * 1024 * 1024;
 
+                let scan_options = ScanOptions {
+                    cache,
+                    app_cache,
+                    temp,
+                    trash,
+                    build,
+                    downloads,
+                    large,
+                    old,
+                    browser,
+                    system,
+                    empty,
+                    duplicates,
+                    project_age_days: config.thresholds.project_age_days,
+                    min_age_days: config.thresholds.min_age_days,
+                    min_size_bytes,
+                };
+
                 let results = scanner::scan_all(
                     &scan_path,
-                    ScanOptions {
-                        cache,
-                        app_cache,
-                        temp,
-                        trash,
-                        build,
-                        downloads,
-                        large,
-                        old,
-                        browser,
-                        system,
-                        empty,
-                        duplicates,
-                        project_age_days: config.thresholds.project_age_days,
-                        min_age_days: config.thresholds.min_age_days,
-                        min_size_bytes,
-                    },
+                    scan_options.clone(),
                     output_mode,
                     &config,
                 )?;
@@ -556,7 +600,7 @@ impl Cli {
                 if json {
                     output::print_json(&results)?;
                 } else {
-                    output::print_human(&results, output_mode);
+                    output::print_human_with_options(&results, output_mode, Some(&scan_options));
                 }
 
                 Ok(())
@@ -654,25 +698,27 @@ impl Cli {
                 // Use config values (after CLI overrides) for scan options
                 let min_size_bytes = config.thresholds.min_size_mb * 1024 * 1024;
 
+                let scan_options = ScanOptions {
+                    cache,
+                    app_cache,
+                    temp,
+                    trash,
+                    build,
+                    downloads,
+                    large,
+                    old,
+                    browser,
+                    system,
+                    empty,
+                    duplicates,
+                    project_age_days: config.thresholds.project_age_days,
+                    min_age_days: config.thresholds.min_age_days,
+                    min_size_bytes,
+                };
+
                 let results = scanner::scan_all(
                     &scan_path,
-                    ScanOptions {
-                        cache,
-                        app_cache,
-                        temp,
-                        trash,
-                        build,
-                        downloads,
-                        large,
-                        old,
-                        browser,
-                        system,
-                        empty,
-                        duplicates,
-                        project_age_days: config.thresholds.project_age_days,
-                        min_age_days: config.thresholds.min_age_days,
-                        min_size_bytes,
-                    },
+                    scan_options.clone(),
                     output_mode,
                     &config,
                 )?;
@@ -680,7 +726,7 @@ impl Cli {
                 if json {
                     output::print_json(&results)?;
                 } else {
-                    output::print_human(&results, output_mode);
+                    output::print_human_with_options(&results, output_mode, Some(&scan_options));
                 }
 
                 cleaner::clean_all(&results, yes, output_mode, permanent, dry_run)?;
@@ -689,6 +735,7 @@ impl Cli {
             }
             Commands::Analyze {
                 disk,
+                entire_disk,
                 interactive,
                 depth,
                 top,
@@ -712,6 +759,9 @@ impl Cli {
                 min_size,
                 exclude,
             } => {
+                // Load config first
+                let config = Config::load();
+                
                 // Determine if we're in disk insights mode or legacy cleanable file mode
                 let has_category_flags = cache
                     || app_cache
@@ -731,15 +781,23 @@ impl Cli {
                 if disk_mode {
                     // Disk insights mode
                     use crate::disk_usage::{scan_directory, SortBy};
+                    use crate::utils;
 
-                    // Determine scan path (default to user profile)
-                    let scan_path = path.unwrap_or_else(|| {
+                    // Determine scan path
+                    let scan_path = if let Some(custom_path) = path {
+                        // User specified a custom path
+                        custom_path
+                    } else if entire_disk {
+                        // User wants to scan entire disk
+                        utils::get_root_disk_path()
+                    } else {
+                        // Default to user directory
                         if let Ok(userprofile) = std::env::var("USERPROFILE") {
                             PathBuf::from(&userprofile)
                         } else {
                             std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                         }
-                    });
+                    };
 
                     if !scan_path.exists() {
                         return Err(anyhow::anyhow!(
@@ -755,12 +813,36 @@ impl Cli {
                         _ => SortBy::Size,
                     };
 
-                    // Scan directory
-                    if output_mode != OutputMode::Quiet {
-                        println!("Scanning {}...", scan_path.display());
-                    }
+                    // Adjust depth based on scan type and config
+                    // If user specified depth explicitly, use it; otherwise use config defaults
+                    let effective_depth = if depth == 3 {
+                        // User didn't specify depth, use config defaults
+                        if entire_disk {
+                            config.ui.scan_depth_entire_disk
+                        } else {
+                            config.ui.scan_depth_user
+                        }
+                    } else {
+                        // User specified depth explicitly via CLI, use it (overrides config)
+                        depth
+                    };
 
-                    let insights = scan_directory(&scan_path, depth)?;
+                    // Scan directory
+                    let spinner = if output_mode != OutputMode::Quiet {
+                        Some(crate::progress::create_spinner(&format!(
+                            "Scanning {} (depth: {})...",
+                            scan_path.display(),
+                            effective_depth
+                        )))
+                    } else {
+                        None
+                    };
+
+                    let insights = scan_directory(&scan_path, effective_depth)?;
+
+                    if let Some(sp) = spinner {
+                        crate::progress::finish_and_clear(&sp);
+                    }
 
                     if interactive {
                         // Launch TUI mode
@@ -1052,7 +1134,7 @@ impl Cli {
                 }
                 Ok(())
             }
-            Commands::Restore { last, path, from } => {
+            Commands::Restore { last, path, from, all } => {
                 let output_mode = if self.quiet {
                     OutputMode::Quiet
                 } else if self.verbose >= 2 {
@@ -1063,7 +1145,24 @@ impl Cli {
                     OutputMode::Normal
                 };
 
-                if last {
+                if all {
+                    // Restore all contents of Recycle Bin in bulk
+                    match restore::restore_all_bin(output_mode, None) {
+                        Ok(result) => {
+                            if output_mode != OutputMode::Quiet {
+                                println!();
+                                println!(
+                                    "{} {}",
+                                    Theme::success("OK"),
+                                    Theme::success(&result.summary())
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            return Err(anyhow::anyhow!("Failed to restore: {}", e));
+                        }
+                    }
+                } else if last {
                     // Restore from last deletion session
                     match restore::restore_last(output_mode) {
                         Ok(result) => {
@@ -1138,10 +1237,62 @@ impl Cli {
 
                 Ok(())
             }
+            Commands::Remove { config, data, yes } => {
+                let output_mode = if self.quiet {
+                    OutputMode::Quiet
+                } else if self.verbose >= 2 {
+                    OutputMode::VeryVerbose
+                } else if self.verbose == 1 {
+                    OutputMode::Verbose
+                } else {
+                    OutputMode::Normal
+                };
+
+                // Confirm unless --yes flag is provided
+                if !yes {
+                    println!();
+                    println!("{}", Theme::warning("Warning: This will uninstall wole from your system."));
+                    println!();
+                    println!("This will:");
+                    println!("  • Remove the wole executable");
+                    println!("  • Remove wole from your PATH");
+                    if config {
+                        println!("  • Remove config directory ({})", 
+                            uninstall::get_config_dir()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|_| "%APPDATA%\\wole".to_string()));
+                    }
+                    if data {
+                        println!("  • Remove data directory ({})", 
+                            uninstall::get_data_dir()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|_| "%LOCALAPPDATA%\\wole".to_string()));
+                    }
+                    println!();
+                    print!("Are you sure you want to continue? [y/N]: ");
+                    io::stdout().flush().ok();
+                    let input = match read_line_from_stdin() {
+                        Ok(line) => line.trim().to_lowercase(),
+                        Err(_) => {
+                            // If reading fails (e.g., stdin is not available), default to "no"
+                            println!("\nUninstall cancelled (failed to read input).");
+                            return Ok(());
+                        }
+                    };
+                    if input != "y" && input != "yes" {
+                        println!("Uninstall cancelled.");
+                        return Ok(());
+                    }
+                }
+
+                uninstall::uninstall(config, data, output_mode)?;
+                Ok(())
+            }
         }
     }
 }
 
+#[derive(Clone)]
 pub struct ScanOptions {
     pub cache: bool,
     pub app_cache: bool,

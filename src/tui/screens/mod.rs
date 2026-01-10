@@ -6,6 +6,7 @@ pub mod dashboard;
 pub mod disk_insights;
 pub mod preview;
 pub mod restore;
+pub mod restore_selection;
 pub mod results;
 pub mod scanning;
 pub mod success;
@@ -24,6 +25,7 @@ pub fn render(f: &mut Frame, app_state: &mut AppState) {
         crate::tui::state::Screen::Confirm { .. } => confirm::render(f, app_state),
         crate::tui::state::Screen::Cleaning { .. } => scanning::render_cleaning(f, app_state),
         crate::tui::state::Screen::Success { .. } => success::render(f, app_state),
+        crate::tui::state::Screen::RestoreSelection { .. } => restore_selection::render(f, app_state),
         crate::tui::state::Screen::Restore { .. } => restore::render(f, app_state),
         crate::tui::state::Screen::DiskInsights { .. } => disk_insights::render(f, app_state),
     }

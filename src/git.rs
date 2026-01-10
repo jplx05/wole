@@ -35,6 +35,10 @@ pub fn clear_cache() {
 ///
 /// Uses a thread-local HashMap cache to avoid repeated directory traversal.
 /// This provides significant speedup when scanning many files in the same project.
+///
+/// PERFORMANCE: Avoids expensive canonicalize() calls by using a two-level cache:
+/// 1. First checks cache with normalized (non-canonicalized) path
+/// 2. Only canonicalizes if cache miss and path might be a symlink/junction
 pub fn find_git_root_cached(path: &Path) -> Option<PathBuf> {
     // Normalize to parent directory if path is a file
     let dir = if path.is_file() {
@@ -43,18 +47,27 @@ pub fn find_git_root_cached(path: &Path) -> Option<PathBuf> {
         path
     };
 
-    // Normalize path for cache key (canonicalize if possible, otherwise use as-is)
-    let cache_key = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    // Normalize path for cache key - use absolute path without canonicalize for speed
+    // canonicalize() is very expensive on Windows, especially for OneDrive paths
+    let cache_key = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .ok()
+            .map(|cwd| cwd.join(dir))
+            .unwrap_or_else(|| dir.to_path_buf())
+    };
 
     GIT_ROOT_CACHE.with(|cache| {
         let mut cache_ref = cache.borrow_mut();
 
-        // Check cache first
+        // Check cache first with normalized path (fast path)
         if let Some(cached_result) = cache_ref.get(&cache_key) {
             return cached_result.clone();
         }
 
         // Not in cache - compute and store
+        // Use the normalized path directly - find_git_root handles relative paths correctly
         let result = find_git_root(&cache_key);
         cache_ref.insert(cache_key, result.clone());
         result

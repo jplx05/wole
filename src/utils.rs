@@ -5,6 +5,35 @@
 
 use std::path::{Path, PathBuf};
 
+/// Get the root disk path for the current system
+///
+/// On Windows, returns the drive root (e.g., "C:\")
+/// On Unix systems, returns "/"
+pub fn get_root_disk_path() -> PathBuf {
+    #[cfg(windows)]
+    {
+        // On Windows, get the drive root from the current directory
+        if let Ok(current_dir) = std::env::current_dir() {
+            // Convert to string and extract drive letter
+            let dir_str = current_dir.to_string_lossy();
+            // Look for drive letter pattern (e.g., "C:\" or "C:")
+            if let Some(drive_letter) = dir_str.chars().next() {
+                if drive_letter.is_ascii_alphabetic() && dir_str.len() > 1 && dir_str.chars().nth(1) == Some(':') {
+                    return PathBuf::from(format!("{}:\\", drive_letter));
+                }
+            }
+        }
+        // Fallback to C:\ if we can't determine from current directory
+        PathBuf::from("C:\\")
+    }
+    
+    #[cfg(not(windows))]
+    {
+        // On Unix systems, root is "/"
+        PathBuf::from("/")
+    }
+}
+
 /// Convert to long path format for Windows (\\?\)
 ///
 /// Windows has a default path length limit of 260 characters (MAX_PATH).
@@ -488,6 +517,7 @@ pub fn to_relative_path(path: &Path, base: &Path) -> String {
 }
 
 /// System directories to always skip during scanning
+/// These are Windows system directories that should not be scanned
 pub const SYSTEM_DIRS: &[&str] = &[
     "Windows",
     "Program Files",
@@ -497,6 +527,8 @@ pub const SYSTEM_DIRS: &[&str] = &[
     "System Volume Information",
     "Recovery",
     "MSOCache",
+    // Note: We intentionally scan Users directory even though it contains some system files
+    // because it also contains user data which is what we want to analyze
 ];
 
 /// Check if path contains a system directory

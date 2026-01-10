@@ -4,6 +4,7 @@ use crate::config::Config;
 use crate::git;
 use crate::output::{CategoryResult, OutputMode, ScanResults};
 use crate::progress;
+use crate::theme::Theme;
 use crate::utils;
 use anyhow::Result;
 // use rayon::prelude::*; // Disabled: using sequential scan to avoid thrashing
@@ -90,6 +91,10 @@ pub fn scan_all(
     let duplicates_config = config.categories.duplicates.clone();
     let config_clone = config.clone(); // Clone full config for parallel access
 
+    // Store duplicate groups separately (needs to be stored after scan)
+    use std::cell::RefCell;
+    let duplicate_groups: RefCell<Option<Vec<crate::categories::duplicates::DuplicateGroup>>> = RefCell::new(None);
+
     // Run scans sequentially to avoid disk thrashing and thread pool explosion
     // Each individual scanner (large, duplicates, build) manages its own parallelism
     // and uses the full system resources. Running them in parallel causes massive
@@ -108,19 +113,25 @@ pub fn scan_all(
                     name, count, total_categories
                 ));
             }
+            
+            // Show category header in Normal+ mode
+            if mode != OutputMode::Quiet {
+                println!();
+                println!("{}", Theme::header(&format!("Scanning {}", name)));
+            }
 
             // Execute scan - pass config to all scanners for exclusion filtering
             let result = match task {
-                ScanTask::Cache => categories::cache::scan(&path_owned, config),
-                ScanTask::AppCache => categories::app_cache::scan(&path_owned, config),
+                ScanTask::Cache => categories::cache::scan(&path_owned, config, mode),
+                ScanTask::AppCache => categories::app_cache::scan(&path_owned, config, mode),
                 ScanTask::Temp => categories::temp::scan(&path_owned, config),
                 ScanTask::Trash => categories::trash::scan(),
                 ScanTask::Build(age) => {
-                    categories::build::scan(&path_owned, *age, Some(&build_config), config)
+                    categories::build::scan(&path_owned, *age, Some(&build_config), config, mode)
                 }
-                ScanTask::Downloads(age) => categories::downloads::scan(&path_owned, *age, config),
-                ScanTask::Large(size) => categories::large::scan(&path_owned, *size, config),
-                ScanTask::Old(age) => categories::old::scan(&path_owned, *age, config),
+                ScanTask::Downloads(age) => categories::downloads::scan(&path_owned, *age, config, mode),
+                ScanTask::Large(size) => categories::large::scan(&path_owned, *size, config, mode),
+                ScanTask::Old(age) => categories::old::scan(&path_owned, *age, config, mode),
                 ScanTask::Browser => categories::browser::scan(&path_owned, config),
                 ScanTask::System => categories::system::scan(&path_owned, config),
                 ScanTask::Empty => categories::empty::scan(&path_owned, config),
@@ -132,7 +143,11 @@ pub fn scan_all(
                         Some(&duplicates_config),
                         config,
                     ) {
-                        Ok(dup_result) => Ok(dup_result.to_category_result()),
+                        Ok(dup_result) => {
+                            // Store groups for enhanced display
+                            *duplicate_groups.borrow_mut() = Some(dup_result.groups.clone());
+                            Ok(dup_result.to_category_result())
+                        },
                         Err(e) => Err(e),
                     }
                 }
@@ -161,7 +176,11 @@ pub fn scan_all(
             ("browser", Ok(r)) => results.browser = r,
             ("system", Ok(r)) => results.system = r,
             ("empty", Ok(r)) => results.empty = r,
-            ("duplicates", Ok(r)) => results.duplicates = r,
+            ("duplicates", Ok(r)) => {
+                results.duplicates = r;
+                // Store duplicate groups for enhanced display
+                results.duplicates_groups = duplicate_groups.borrow().clone();
+            },
             (name, Err(e)) => {
                 if mode != OutputMode::Quiet {
                     eprintln!("[WARNING] {} scan failed: {}", name, e);

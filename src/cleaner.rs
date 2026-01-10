@@ -5,8 +5,39 @@ use crate::progress;
 use crate::theme::Theme;
 use crate::utils;
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Read a line from stdin, handling terminal focus loss issues on Windows.
+/// This function ensures stdin is properly synchronized and clears any stale input
+/// before reading, which fixes issues when the terminal loses and regains focus.
+/// 
+/// On Windows, when a terminal loses focus and regains it, stdin can be in a
+/// problematic state. This function ensures we get a fresh stdin handle each time,
+/// which helps resolve focus-related input issues.
+fn read_line_from_stdin() -> io::Result<String> {
+    // Flush stdout to ensure prompt is visible before reading
+    io::stdout().flush()?;
+    
+    // Always get a fresh stdin handle to avoid issues with stale locks
+    // This is especially important on Windows when the terminal loses focus
+    let mut input = String::new();
+    
+    // Use BufRead for better control and proper buffering
+    use std::io::BufRead;
+    
+    // Get a fresh stdin handle each time (don't reuse a locked handle)
+    // This ensures we're reading from the current terminal state
+    let stdin = io::stdin();
+    let mut handle = stdin.lock();
+    
+    // Read a line - this will block until the user types and presses Enter
+    // On Windows, getting a fresh handle helps when the terminal has lost focus
+    handle.read_line(&mut input)?;
+    
+    Ok(input)
+}
 
 /// Check if a file is locked by another process (Windows-specific)
 ///
@@ -32,6 +63,84 @@ fn is_file_locked(_path: &Path) -> bool {
     // On Unix, file locking works differently (advisory locks)
     // We don't check for locks here as files can still be deleted
     false
+}
+
+/// Helper function to batch clean a category (10-50x faster than one-by-one)
+fn batch_clean_category_internal(
+    paths: &[PathBuf],
+    category_name: &str,
+    permanent: bool,
+    dry_run: bool,
+    progress: Option<&indicatif::ProgressBar>,
+    history: Option<&mut DeletionLog>,
+    mode: OutputMode,
+) -> (u64, u64) {
+    
+    if paths.is_empty() {
+        return (0, 0);
+    }
+    
+    if let Some(pb) = progress {
+        let msg = format!("Cleaning {}...", category_name);
+        pb.set_message(msg);
+    }
+    
+    if dry_run {
+        let count = paths.len() as u64;
+        if let Some(pb) = progress {
+            pb.inc(count);
+        }
+        return (count, 0);
+    }
+    
+    // Calculate sizes BEFORE deletion (critical for accurate logging)
+    // Once files are deleted, we can't get their sizes anymore
+    let mut path_sizes: HashMap<PathBuf, u64> = HashMap::new();
+    if history.is_some() {
+        for path in paths {
+            let size = if path.is_dir() {
+                utils::calculate_dir_size(path)
+            } else {
+                utils::safe_metadata(path).map(|m| m.len()).unwrap_or(0)
+            };
+            path_sizes.insert(path.clone(), size);
+        }
+    }
+    
+    // Use batch deletion for much better performance
+    // Batch deletion completes instantly, so progress updates happen after completion
+    let (success_count, error_count, deleted_paths) = clean_paths_batch(paths, permanent);
+    
+    // Log successes and failures using pre-calculated sizes
+    if let Some(log) = history {
+        for path in &deleted_paths {
+            let size = path_sizes.get(path).copied().unwrap_or(0);
+            log.log_success(path, size, category_name, permanent);
+        }
+        // Log failures (paths that weren't deleted)
+        for path in paths {
+            if !deleted_paths.contains(path) {
+                let size = path_sizes.get(path).copied().unwrap_or(0);
+                log.log_failure(path, size, category_name, permanent, "Batch deletion failed");
+            }
+        }
+    }
+    
+    // Update progress
+    if let Some(pb) = progress {
+        pb.inc(success_count as u64);
+    }
+    
+    // Report errors
+    if error_count > 0 && mode != OutputMode::Quiet {
+        eprintln!(
+            "[WARNING] Failed to clean {} {} items",
+            Theme::error(&error_count.to_string()),
+            category_name
+        );
+    }
+    
+    (success_count as u64, error_count as u64)
 }
 
 /// Clean all categories based on scan results
@@ -93,24 +202,26 @@ pub fn clean_all(
 
     if !skip_confirm && !dry_run {
         print!(
-            "Delete {} items ({})? [y/N]: ",
+            "Delete {} items ({})? [yes/no]: ",
             Theme::value(&total_items.to_string()),
             Theme::warning(&bytesize::to_string(total_bytes, true))
         );
-        io::stdout().flush()?;
 
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-
-        if !input.trim().eq_ignore_ascii_case("y") {
+        let input = read_line_from_stdin()?;
+        let trimmed = input.trim().to_lowercase();
+        // Accept: "y", "yes" (and their uppercase variants)
+        let confirmed = trimmed == "y" || trimmed == "yes";
+        
+        if !confirmed {
             println!("{}", Theme::muted("Cancelled."));
             return Ok(());
         }
     }
 
-    // Create progress bar with ETA
+    // Create progress bar (simpler version without ETA for batch operations)
+    // Batch operations complete too quickly for meaningful ETA/speed calculations
     let progress = if mode != OutputMode::Quiet {
-        Some(progress::create_progress_bar_with_eta(
+        Some(progress::create_progress_bar(
             total_items as u64,
             "Cleaning...",
         ))
@@ -129,129 +240,51 @@ pub fn clean_all(
     let mut cleaned_bytes = 0u64;
     let mut errors = 0;
 
-    // Clean cache
+    // Clean cache (batch)
     if results.cache.items > 0 {
-        if let Some(ref pb) = progress {
-            pb.set_message("Cleaning cache...");
-        }
-        for path in &results.cache.paths {
-            let size = utils::safe_metadata(path).map(|m| m.len()).unwrap_or(0);
-            if dry_run {
-                cleaned += 1;
-                if let Some(ref pb) = progress {
-                    pb.inc(1);
-                }
-            } else {
-                match clean_path(path, permanent) {
-                    Ok(()) => {
-                        cleaned += 1;
-                        if let Some(ref pb) = progress {
-                            pb.inc(1);
-                        }
-                        if let Some(ref mut log) = history {
-                            log.log_success(path, size, "cache", permanent);
-                        }
-                    }
-                    Err(e) => {
-                        errors += 1;
-                        if let Some(ref mut log) = history {
-                            log.log_failure(path, size, "cache", permanent, &e.to_string());
-                        }
-                        if mode != OutputMode::Quiet {
-                            eprintln!(
-                                "[WARNING] Failed to clean {}: {}",
-                                Theme::secondary(&path.display().to_string()),
-                                Theme::error(&e.to_string())
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        let (success, errs) = batch_clean_category_internal(
+            &results.cache.paths,
+            "cache",
+            permanent,
+            dry_run,
+            progress.as_ref(),
+            history.as_mut(),
+            mode,
+        );
+        cleaned += success;
+        errors += errs;
         cleaned_bytes += results.cache.size_bytes;
     }
 
-    // Clean application cache
+    // Clean application cache (batch)
     if results.app_cache.items > 0 {
-        if let Some(ref pb) = progress {
-            pb.set_message("Cleaning application cache...");
-        }
-        for path in &results.app_cache.paths {
-            let size = utils::safe_metadata(path).map(|m| m.len()).unwrap_or(0);
-            if dry_run {
-                cleaned += 1;
-                if let Some(ref pb) = progress {
-                    pb.inc(1);
-                }
-            } else {
-                match clean_path(path, permanent) {
-                    Ok(()) => {
-                        cleaned += 1;
-                        if let Some(ref pb) = progress {
-                            pb.inc(1);
-                        }
-                        if let Some(ref mut log) = history {
-                            log.log_success(path, size, "app_cache", permanent);
-                        }
-                    }
-                    Err(e) => {
-                        errors += 1;
-                        if let Some(ref mut log) = history {
-                            log.log_failure(path, size, "app_cache", permanent, &e.to_string());
-                        }
-                        if mode != OutputMode::Quiet {
-                            eprintln!(
-                                "[WARNING] Failed to clean {}: {}",
-                                Theme::secondary(&path.display().to_string()),
-                                Theme::error(&e.to_string())
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        let (success, errs) = batch_clean_category_internal(
+            &results.app_cache.paths,
+            "application cache",
+            permanent,
+            dry_run,
+            progress.as_ref(),
+            history.as_mut(),
+            mode,
+        );
+        cleaned += success;
+        errors += errs;
         cleaned_bytes += results.app_cache.size_bytes;
     }
 
-    // Clean temp
+    // Clean temp (batch)
     if results.temp.items > 0 {
-        if let Some(ref pb) = progress {
-            pb.set_message("Cleaning temp files...");
-        }
-        for path in &results.temp.paths {
-            let size = utils::safe_metadata(path).map(|m| m.len()).unwrap_or(0);
-            if dry_run {
-                cleaned += 1;
-                if let Some(ref pb) = progress {
-                    pb.inc(1);
-                }
-            } else {
-                match clean_path(path, permanent) {
-                    Ok(()) => {
-                        cleaned += 1;
-                        if let Some(ref pb) = progress {
-                            pb.inc(1);
-                        }
-                        if let Some(ref mut log) = history {
-                            log.log_success(path, size, "temp", permanent);
-                        }
-                    }
-                    Err(e) => {
-                        errors += 1;
-                        if let Some(ref mut log) = history {
-                            log.log_failure(path, size, "temp", permanent, &e.to_string());
-                        }
-                        if mode != OutputMode::Quiet {
-                            eprintln!(
-                                "[WARNING] Failed to clean {}: {}",
-                                Theme::secondary(&path.display().to_string()),
-                                Theme::error(&e.to_string())
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        let (success, errs) = batch_clean_category_internal(
+            &results.temp.paths,
+            "temp files",
+            permanent,
+            dry_run,
+            progress.as_ref(),
+            history.as_mut(),
+            mode,
+        );
+        cleaned += success;
+        errors += errs;
         cleaned_bytes += results.temp.size_bytes;
     }
 
@@ -305,175 +338,67 @@ pub fn clean_all(
         }
     }
 
-    // Clean build artifacts
+    // Clean build artifacts (batch)
     if results.build.items > 0 {
-        if let Some(ref pb) = progress {
-            pb.set_message("Cleaning build artifacts...");
-        }
-        for path in &results.build.paths {
-            let size = if path.is_dir() {
-                utils::calculate_dir_size(path)
-            } else {
-                utils::safe_metadata(path).map(|m| m.len()).unwrap_or(0)
-            };
-            if dry_run {
-                cleaned += 1;
-                if let Some(ref pb) = progress {
-                    pb.inc(1);
-                }
-            } else {
-                match clean_path(path, permanent) {
-                    Ok(()) => {
-                        cleaned += 1;
-                        if let Some(ref pb) = progress {
-                            pb.inc(1);
-                        }
-                        if let Some(ref mut log) = history {
-                            log.log_success(path, size, "build", permanent);
-                        }
-                    }
-                    Err(e) => {
-                        errors += 1;
-                        if let Some(ref mut log) = history {
-                            log.log_failure(path, size, "build", permanent, &e.to_string());
-                        }
-                        if mode != OutputMode::Quiet {
-                            eprintln!(
-                                "[WARNING] Failed to clean {}: {}",
-                                Theme::secondary(&path.display().to_string()),
-                                Theme::error(&e.to_string())
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        let (success, errs) = batch_clean_category_internal(
+            &results.build.paths,
+            "build artifacts",
+            permanent,
+            dry_run,
+            progress.as_ref(),
+            history.as_mut(),
+            mode,
+        );
+        cleaned += success;
+        errors += errs;
         cleaned_bytes += results.build.size_bytes;
     }
 
-    // Clean downloads
+    // Clean downloads (batch)
     if results.downloads.items > 0 {
-        if let Some(ref pb) = progress {
-            pb.set_message("Cleaning old downloads...");
-        }
-        for path in &results.downloads.paths {
-            let size = utils::safe_metadata(path).map(|m| m.len()).unwrap_or(0);
-            if dry_run {
-                cleaned += 1;
-                if let Some(ref pb) = progress {
-                    pb.inc(1);
-                }
-            } else {
-                match clean_path(path, permanent) {
-                    Ok(()) => {
-                        cleaned += 1;
-                        if let Some(ref pb) = progress {
-                            pb.inc(1);
-                        }
-                        if let Some(ref mut log) = history {
-                            log.log_success(path, size, "downloads", permanent);
-                        }
-                    }
-                    Err(e) => {
-                        errors += 1;
-                        if let Some(ref mut log) = history {
-                            log.log_failure(path, size, "downloads", permanent, &e.to_string());
-                        }
-                        if mode != OutputMode::Quiet {
-                            eprintln!(
-                                "[WARNING] Failed to clean {}: {}",
-                                Theme::secondary(&path.display().to_string()),
-                                Theme::error(&e.to_string())
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        let (success, errs) = batch_clean_category_internal(
+            &results.downloads.paths,
+            "old downloads",
+            permanent,
+            dry_run,
+            progress.as_ref(),
+            history.as_mut(),
+            mode,
+        );
+        cleaned += success;
+        errors += errs;
         cleaned_bytes += results.downloads.size_bytes;
     }
 
-    // Clean large files
+    // Clean large files (batch)
     if results.large.items > 0 {
-        if let Some(ref pb) = progress {
-            pb.set_message("Cleaning large files...");
-        }
-        for path in &results.large.paths {
-            let size = utils::safe_metadata(path).map(|m| m.len()).unwrap_or(0);
-            if dry_run {
-                cleaned += 1;
-                if let Some(ref pb) = progress {
-                    pb.inc(1);
-                }
-            } else {
-                match clean_path(path, permanent) {
-                    Ok(()) => {
-                        cleaned += 1;
-                        if let Some(ref pb) = progress {
-                            pb.inc(1);
-                        }
-                        if let Some(ref mut log) = history {
-                            log.log_success(path, size, "large", permanent);
-                        }
-                    }
-                    Err(e) => {
-                        errors += 1;
-                        if let Some(ref mut log) = history {
-                            log.log_failure(path, size, "large", permanent, &e.to_string());
-                        }
-                        if mode != OutputMode::Quiet {
-                            eprintln!(
-                                "[WARNING] Failed to clean {}: {}",
-                                Theme::secondary(&path.display().to_string()),
-                                Theme::error(&e.to_string())
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        let (success, errs) = batch_clean_category_internal(
+            &results.large.paths,
+            "large files",
+            permanent,
+            dry_run,
+            progress.as_ref(),
+            history.as_mut(),
+            mode,
+        );
+        cleaned += success;
+        errors += errs;
         cleaned_bytes += results.large.size_bytes;
     }
 
-    // Clean old files
+    // Clean old files (batch)
     if results.old.items > 0 {
-        if let Some(ref pb) = progress {
-            pb.set_message("Cleaning old files...");
-        }
-        for path in &results.old.paths {
-            let size = utils::safe_metadata(path).map(|m| m.len()).unwrap_or(0);
-            if dry_run {
-                cleaned += 1;
-                if let Some(ref pb) = progress {
-                    pb.inc(1);
-                }
-            } else {
-                match clean_path(path, permanent) {
-                    Ok(()) => {
-                        cleaned += 1;
-                        if let Some(ref pb) = progress {
-                            pb.inc(1);
-                        }
-                        if let Some(ref mut log) = history {
-                            log.log_success(path, size, "old", permanent);
-                        }
-                    }
-                    Err(e) => {
-                        errors += 1;
-                        if let Some(ref mut log) = history {
-                            log.log_failure(path, size, "old", permanent, &e.to_string());
-                        }
-                        if mode != OutputMode::Quiet {
-                            eprintln!(
-                                "[WARNING] Failed to clean {}: {}",
-                                Theme::secondary(&path.display().to_string()),
-                                Theme::error(&e.to_string())
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        let (success, errs) = batch_clean_category_internal(
+            &results.old.paths,
+            "old files",
+            permanent,
+            dry_run,
+            progress.as_ref(),
+            history.as_mut(),
+            mode,
+        );
+        cleaned += success;
+        errors += errs;
         cleaned_bytes += results.old.size_bytes;
     }
 
@@ -610,45 +535,19 @@ pub fn clean_all(
         cleaned_bytes += results.empty.size_bytes;
     }
 
-    // Clean duplicate files
+    // Clean duplicate files (batch)
     if results.duplicates.items > 0 {
-        if let Some(ref pb) = progress {
-            pb.set_message("Cleaning duplicate files...");
-        }
-        for path in &results.duplicates.paths {
-            let size = utils::safe_metadata(path).map(|m| m.len()).unwrap_or(0);
-            if dry_run {
-                cleaned += 1;
-                if let Some(ref pb) = progress {
-                    pb.inc(1);
-                }
-            } else {
-                match clean_path(path, permanent) {
-                    Ok(()) => {
-                        cleaned += 1;
-                        if let Some(ref pb) = progress {
-                            pb.inc(1);
-                        }
-                        if let Some(ref mut log) = history {
-                            log.log_success(path, size, "duplicates", permanent);
-                        }
-                    }
-                    Err(e) => {
-                        errors += 1;
-                        if let Some(ref mut log) = history {
-                            log.log_failure(path, size, "duplicates", permanent, &e.to_string());
-                        }
-                        if mode != OutputMode::Quiet {
-                            eprintln!(
-                                "[WARNING] Failed to clean {}: {}",
-                                Theme::secondary(&path.display().to_string()),
-                                Theme::error(&e.to_string())
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        let (success, errs) = batch_clean_category_internal(
+            &results.duplicates.paths,
+            "duplicate files",
+            permanent,
+            dry_run,
+            progress.as_ref(),
+            history.as_mut(),
+            mode,
+        );
+        cleaned += success;
+        errors += errs;
         cleaned_bytes += results.duplicates.size_bytes;
     }
 

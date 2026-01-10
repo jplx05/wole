@@ -50,15 +50,25 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
         terminal.draw(|f| render(f, &mut app_state))?;
 
         // Handle pending restore
-        if matches!(
-            app_state.screen,
-            crate::tui::state::Screen::Restore {
-                progress: None,
-                result: None
-            }
-        ) {
+        if let crate::tui::state::Screen::Restore {
+            progress: None,
+            result: None,
+            restore_all_bin,
+        } = &app_state.screen
+        {
             // Initialize restore progress
-            match restore::get_restore_count() {
+            let result = if *restore_all_bin {
+                // For restore all bin, get count from Recycle Bin
+                trash::os_limited::list()
+                    .map(|items| items.len())
+                    .map_err(|e| anyhow::anyhow!("Failed to list Recycle Bin: {}", e))
+            } else {
+                // For restore from last deletion, get count from history
+                restore::get_restore_count()
+                    .map_err(|e| anyhow::anyhow!("Failed to get restore count: {}", e))
+            };
+            
+            match result {
                 Ok(total) => {
                     app_state.screen = crate::tui::state::Screen::Restore {
                         progress: Some(crate::tui::state::RestoreProgress {
@@ -70,6 +80,7 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
                             restored_bytes: 0,
                         }),
                         result: None,
+                        restore_all_bin: *restore_all_bin,
                     };
                 }
                 Err(e) => {
@@ -85,11 +96,18 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
         if let crate::tui::state::Screen::Restore {
             ref mut progress,
             result: None,
+            restore_all_bin,
         } = app_state.screen
         {
             if progress.is_some() {
                 // Perform restore operation with progress updates
-                match perform_restore(&mut app_state, &mut terminal) {
+                let result = if restore_all_bin {
+                    perform_restore_all_bin(&mut app_state, &mut terminal)
+                } else {
+                    perform_restore(&mut app_state, &mut terminal)
+                };
+                
+                match result {
                     Ok(result) => {
                         app_state.screen = crate::tui::state::Screen::Restore {
                             progress: None,
@@ -99,6 +117,7 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
                                 errors: result.errors,
                                 not_found: result.not_found,
                             }),
+                            restore_all_bin,
                         };
                     }
                     Err(e) => {
@@ -128,6 +147,7 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
                     app_state.screen
                 {
                     progress.current_path.clone().unwrap_or_else(|| {
+                        // Default to user directory
                         if let Ok(userprofile) = std::env::var("USERPROFILE") {
                             std::path::PathBuf::from(&userprofile)
                         } else {
@@ -135,10 +155,14 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
                                 .unwrap_or_else(|_| std::path::PathBuf::from("."))
                         }
                     })
-                } else if let Ok(userprofile) = std::env::var("USERPROFILE") {
-                    std::path::PathBuf::from(&userprofile)
                 } else {
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    // Default to user directory
+                    if let Ok(userprofile) = std::env::var("USERPROFILE") {
+                        std::path::PathBuf::from(&userprofile)
+                    } else {
+                        std::env::current_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    }
                 };
 
                 // Update progress message
@@ -152,7 +176,18 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
 
                 // Perform disk insights scan
                 use crate::disk_usage::{scan_directory, SortBy};
-                match scan_directory(&scan_path, 3) {
+                use crate::utils;
+                
+                // Determine appropriate depth based on scan path and config
+                let config = crate::config::Config::load();
+                let is_root_disk = scan_path == utils::get_root_disk_path();
+                let effective_depth = if is_root_disk {
+                    config.ui.scan_depth_entire_disk
+                } else {
+                    config.ui.scan_depth_user
+                };
+                
+                match scan_directory(&scan_path, effective_depth) {
                     Ok(insights) => {
                         // Check if scan was cancelled
                         if !matches!(app_state.screen, crate::tui::state::Screen::Scanning { .. }) {
@@ -916,6 +951,134 @@ fn perform_restore(
             let _ = terminal.draw(|f| render(f, app_state));
             last_redraw = std::time::Instant::now();
             files_since_redraw = 0;
+        }
+    }
+
+    // Final redraw
+    let _ = terminal.draw(|f| render(f, app_state));
+
+    Ok(result)
+}
+
+/// Perform restoration of all Recycle Bin contents with real-time progress updates
+fn perform_restore_all_bin(
+    app_state: &mut AppState,
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+) -> anyhow::Result<restore::RestoreResult> {
+    // Get current Recycle Bin contents
+    let recycle_bin_items = trash::os_limited::list()
+        .context("Failed to list Recycle Bin contents")?;
+
+    if recycle_bin_items.is_empty() {
+        return Ok(restore::RestoreResult::default());
+    }
+
+    let mut result = restore::RestoreResult::default();
+    const BATCH_SIZE: usize = 100;
+
+    // Create all parent directories before bulk restore
+    let mut parent_dirs: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    for item in &recycle_bin_items {
+        let dest = item.original_parent.join(&item.name);
+        if let Some(parent) = dest.parent() {
+            parent_dirs.insert(std::path::PathBuf::from(parent));
+        }
+    }
+
+    for parent in &parent_dirs {
+        if !parent.exists() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+
+    // Restore in batches for better performance
+    for batch in recycle_bin_items.chunks(BATCH_SIZE) {
+        // Update progress state
+        if let crate::tui::state::Screen::Restore {
+            progress: Some(ref mut prog),
+            ..
+        } = app_state.screen
+        {
+            if let Some(item) = batch.first() {
+                let path = item.original_parent.join(&item.name);
+                let relative_path_str = crate::utils::to_relative_path(&path, &app_state.scan_path);
+                prog.current_path = Some(std::path::PathBuf::from(relative_path_str));
+            }
+        }
+
+        // Redraw terminal periodically
+        let _ = terminal.draw(|f| render(f, app_state));
+
+        // Try bulk restore
+        match trash::os_limited::restore_all(batch.iter().cloned()) {
+            Ok(()) => {
+                // Bulk restore succeeded
+                for item in batch {
+                    result.restored += 1;
+                    // Try to get size from restored file
+                    let restored_path = item.original_parent.join(&item.name);
+                    if let Ok(metadata) = std::fs::metadata(&restored_path) {
+                        result.restored_bytes += metadata.len();
+                    }
+                }
+
+                // Update progress
+                if let crate::tui::state::Screen::Restore {
+                    progress: Some(ref mut prog),
+                    ..
+                } = app_state.screen
+                {
+                    prog.restored = result.restored;
+                    prog.restored_bytes = result.restored_bytes;
+                }
+            }
+            Err(_e) => {
+                // Bulk restore failed - fall back to individual restore
+                for item in batch {
+                    let dest = item.original_parent.join(&item.name);
+                    
+                    // Skip if destination already exists
+                    if dest.exists() {
+                        result.restored += 1;
+                        if let Ok(metadata) = std::fs::metadata(&dest) {
+                            result.restored_bytes += metadata.len();
+                        }
+                        continue;
+                    }
+
+                    match restore::restore_file(&item) {
+                        Ok(()) => {
+                            result.restored += 1;
+                            // Get file size from restored file
+                            if let Ok(metadata) = std::fs::metadata(&dest) {
+                                result.restored_bytes += metadata.len();
+                            }
+
+                            // Update progress
+                            if let crate::tui::state::Screen::Restore {
+                                progress: Some(ref mut prog),
+                                ..
+                            } = app_state.screen
+                            {
+                                prog.restored = result.restored;
+                                prog.restored_bytes = result.restored_bytes;
+                            }
+                        }
+                        Err(_err) => {
+                            result.errors += 1;
+
+                            // Update progress
+                            if let crate::tui::state::Screen::Restore {
+                                progress: Some(ref mut prog),
+                                ..
+                            } = app_state.screen
+                            {
+                                prog.errors = result.errors;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

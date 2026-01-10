@@ -46,10 +46,13 @@ wole clean --cache --temp     # Clean caches and temp files
 wole clean --trash -y         # Empty Recycle Bin
 wole analyze                  # Visual disk explorer
 wole analyze --interactive    # Interactive disk insights TUI
-wole restore --last           # Restore files from last deletion
+wole restore --last           # Restore files from last deletion (bulk)
+wole restore --all            # Restore all Recycle Bin contents (bulk)
 
 wole config --show            # View current configuration
 wole config --edit            # Edit config in your editor
+wole remove                   # Uninstall wole from your system
+wole remove --config --data   # Uninstall and remove all data
 wole --help                   # Show help
 wole --version                # Show installed version
 
@@ -196,21 +199,20 @@ Run wole clean --all to remove these files.
 
 ### File Restore
 
-Easily restore files from your last deletion session.
+Easily restore files from your last deletion session or restore all Recycle Bin contents in bulk.
 
 ```bash
+# Restore from last deletion session (uses bulk restore for better performance)
 $ wole restore --last
 
-Restore files from last deletion session
+# Restore all contents of Recycle Bin in bulk (fastest option on Windows)
+$ wole restore --all
 
-[X] C:\Users\user\Documents\file1.txt (2.3 MB)
-[X] C:\Users\user\Downloads\file2.zip (45 MB)
-[ ] C:\Users\user\Temp\file3.tmp (128 KB)
-
-Selected: 2 files (47.3 MB)
-
-✓ Restored 2 files (47.3 MB)
+# Restore a specific file or directory
+$ wole restore --path "C:\Users\user\Documents\file.txt"
 ```
+
+Restore operations use bulk restore by default for better performance on Windows.
 
 ## Categories
 
@@ -272,6 +274,8 @@ patterns = ["**/important-project/**"]
 ```bash
 wole config --show    # View config
 wole config --edit    # Edit config
+wole remove           # Uninstall wole
+wole remove --config --data  # Uninstall and remove all data
 ```
 
 ## Building from Source

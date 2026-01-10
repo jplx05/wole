@@ -54,6 +54,7 @@ fn render_content(f: &mut Frame, area: Rect, app_state: &AppState, _is_small: bo
     if let crate::tui::state::Screen::Restore {
         ref progress,
         ref result,
+        restore_all_bin,
     } = app_state.screen
     {
         if let Some(ref restore_result) = result {
@@ -64,14 +65,20 @@ fn render_content(f: &mut Frame, area: Rect, app_state: &AppState, _is_small: bo
                 .split(area);
 
             // Title
-            let title = Paragraph::new("Restore Complete")
+            let title_text = if restore_all_bin {
+                "Restore Complete - All Recycle Bin"
+            } else {
+                "Restore Complete"
+            };
+            let title_block = if restore_all_bin { "Restore All" } else { "Restore" };
+            let title = Paragraph::new(title_text)
                 .style(Styles::header())
                 .alignment(Alignment::Center)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Styles::border())
-                        .title("Restore"),
+                        .title(title_block),
                 );
             f.render_widget(title, chunks[0]);
 
@@ -119,8 +126,13 @@ fn render_content(f: &mut Frame, area: Rect, app_state: &AppState, _is_small: bo
                 && restore_result.errors == 0
                 && restore_result.not_found == 0
             {
+                let message = if restore_all_bin {
+                    "Recycle Bin is empty. Nothing to restore."
+                } else {
+                    "No files to restore from last deletion session."
+                };
                 lines.push(Line::from(vec![Span::styled(
-                    "No files to restore from last deletion session.",
+                    message,
                     Styles::muted(),
                 )]));
             }
@@ -147,14 +159,20 @@ fn render_content(f: &mut Frame, area: Rect, app_state: &AppState, _is_small: bo
                 .split(area);
 
             // Title
-            let title = Paragraph::new("Restoring files from last deletion session...")
+            let title_text = if restore_all_bin {
+                "Restoring all Recycle Bin contents..."
+            } else {
+                "Restoring files from last deletion session..."
+            };
+            let title_block = if restore_all_bin { "Restore All" } else { "Restore" };
+            let title = Paragraph::new(title_text)
                 .style(Styles::header())
                 .alignment(Alignment::Center)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Styles::border())
-                        .title("Restore"),
+                        .title(title_block),
                 );
             f.render_widget(title, chunks[0]);
 
@@ -223,14 +241,20 @@ fn render_content(f: &mut Frame, area: Rect, app_state: &AppState, _is_small: bo
             f.render_widget(status_paragraph, chunks[3]);
         } else {
             // Show "Preparing..." message
-            let message = Paragraph::new("Preparing to restore files...")
+            let message_text = if restore_all_bin {
+                "Preparing to restore all Recycle Bin contents..."
+            } else {
+                "Preparing to restore files from last deletion..."
+            };
+            let message_block = if restore_all_bin { "Restore All" } else { "Restore" };
+            let message = Paragraph::new(message_text)
                 .style(Styles::primary())
                 .alignment(Alignment::Center)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Styles::border())
-                        .title("Restore"),
+                        .title(message_block),
                 );
             f.render_widget(message, area);
         }

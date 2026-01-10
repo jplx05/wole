@@ -2,7 +2,7 @@
 
 use crate::cli::ScanOptions;
 use crate::config::Config;
-use crate::output::CategoryResult;
+use crate::output::{CategoryResult, OutputMode};
 use crate::progress;
 use anyhow::Result;
 use rayon::prelude::*;
@@ -407,7 +407,7 @@ impl Scanner for CacheScannerAdapter {
         config: &Config,
     ) -> Result<Vec<CleanableFile>> {
         use crate::categories::cache;
-        let result = cache::scan(std::path::Path::new(""), config)?;
+        let result = cache::scan(std::path::Path::new(""), config, OutputMode::Normal)?;
         Ok(convert_category_result(
             result,
             Category::Cache,
@@ -434,7 +434,7 @@ impl Scanner for AppCacheScannerAdapter {
         config: &Config,
     ) -> Result<Vec<CleanableFile>> {
         use crate::categories::app_cache;
-        let result = app_cache::scan(std::path::Path::new(""), config)?;
+        let result = app_cache::scan(std::path::Path::new(""), config, OutputMode::Normal)?;
         Ok(convert_category_result(
             result,
             Category::AppCache,
@@ -520,6 +520,7 @@ impl Scanner for BuildScannerAdapter {
             options.project_age_days,
             Some(&config.categories.build),
             config,
+            OutputMode::Normal,
         )?;
         Ok(convert_category_result(
             result,
@@ -547,7 +548,7 @@ impl Scanner for DownloadsScannerAdapter {
         config: &Config,
     ) -> Result<Vec<CleanableFile>> {
         use crate::categories::downloads;
-        let result = downloads::scan(std::path::Path::new(""), options.min_age_days, config)?;
+        let result = downloads::scan(std::path::Path::new(""), options.min_age_days, config, OutputMode::Normal)?;
         Ok(convert_category_result(
             result,
             Category::Downloads,
@@ -574,7 +575,7 @@ impl Scanner for LargeScannerAdapter {
         config: &Config,
     ) -> Result<Vec<CleanableFile>> {
         use crate::categories::large;
-        let result = large::scan(std::path::Path::new(""), options.min_size_bytes, config)?;
+        let result = large::scan(std::path::Path::new(""), options.min_size_bytes, config, OutputMode::Normal)?;
         Ok(convert_category_result(
             result,
             Category::Large,
@@ -601,7 +602,7 @@ impl Scanner for OldScannerAdapter {
         config: &Config,
     ) -> Result<Vec<CleanableFile>> {
         use crate::categories::old;
-        let result = old::scan(path, options.min_age_days, config)?;
+        let result = old::scan(path, options.min_age_days, config, OutputMode::Normal)?;
         Ok(convert_category_result(
             result,
             Category::Old,

@@ -37,6 +37,9 @@ pub fn handle_event(
         crate::tui::state::Screen::Success { .. } => {
             handle_success_event(app_state, key, modifiers)
         }
+        crate::tui::state::Screen::RestoreSelection { .. } => {
+            handle_restore_selection_event(app_state, key, modifiers)
+        }
         crate::tui::state::Screen::Restore { .. } => {
             handle_restore_event(app_state, key, modifiers)
         }
@@ -63,6 +66,9 @@ pub fn handle_mouse_event(app_state: &mut AppState, mouse: MouseEvent) -> EventR
             crate::tui::state::Screen::Confirm { .. } => {
                 handle_confirm_event(app_state, KeyCode::Down, KeyModifiers::empty())
             }
+            crate::tui::state::Screen::RestoreSelection { .. } => {
+                handle_restore_selection_event(app_state, KeyCode::Down, KeyModifiers::empty())
+            }
             crate::tui::state::Screen::DiskInsights { .. } => {
                 handle_disk_insights_event(app_state, KeyCode::Down, KeyModifiers::empty())
             }
@@ -80,6 +86,9 @@ pub fn handle_mouse_event(app_state: &mut AppState, mouse: MouseEvent) -> EventR
             }
             crate::tui::state::Screen::Confirm { .. } => {
                 handle_confirm_event(app_state, KeyCode::Up, KeyModifiers::empty())
+            }
+            crate::tui::state::Screen::RestoreSelection { .. } => {
+                handle_restore_selection_event(app_state, KeyCode::Up, KeyModifiers::empty())
             }
             crate::tui::state::Screen::DiskInsights { .. } => {
                 handle_disk_insights_event(app_state, KeyCode::Up, KeyModifiers::empty())
@@ -403,11 +412,8 @@ fn handle_dashboard_event(
                     };
                 }
                 3 => {
-                    // Restore action
-                    app_state.screen = crate::tui::state::Screen::Restore {
-                        progress: None,
-                        result: None,
-                    };
+                    // Restore action - show restore selection screen
+                    app_state.screen = crate::tui::state::Screen::RestoreSelection { cursor: 0 };
                 }
                 4 => {
                     // Config action - show config screen
@@ -1605,6 +1611,52 @@ fn handle_success_event(
             *app_state = AppState::new();
             EventResult::Continue
         }
+    }
+}
+
+fn handle_restore_selection_event(
+    app_state: &mut AppState,
+    key: KeyCode,
+    _modifiers: KeyModifiers,
+) -> EventResult {
+    if let crate::tui::state::Screen::RestoreSelection { ref mut cursor } = app_state.screen {
+        match key {
+            KeyCode::Up => {
+                if *cursor > 0 {
+                    *cursor -= 1;
+                }
+                EventResult::Continue
+            }
+            KeyCode::Down => {
+                if *cursor < 1 {
+                    *cursor += 1;
+                }
+                EventResult::Continue
+            }
+            KeyCode::Enter => {
+                // Start restore operation based on selection
+                let restore_all_bin = *cursor == 1;
+                app_state.screen = crate::tui::state::Screen::Restore {
+                    progress: None,
+                    result: None,
+                    restore_all_bin,
+                };
+                EventResult::Continue
+            }
+            KeyCode::Esc
+            | KeyCode::Backspace
+            | KeyCode::Char('b')
+            | KeyCode::Char('B')
+            | KeyCode::Char('q')
+            | KeyCode::Char('Q') => {
+                // Return to dashboard
+                app_state.screen = crate::tui::state::Screen::Dashboard;
+                EventResult::Continue
+            }
+            _ => EventResult::Continue,
+        }
+    } else {
+        EventResult::Continue
     }
 }
 

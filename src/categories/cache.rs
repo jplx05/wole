@@ -1,8 +1,10 @@
 use crate::config::Config;
-use crate::output::CategoryResult;
+use crate::output::{CategoryResult, OutputMode};
 use crate::scan_events::ScanProgressEvent;
+use crate::theme::Theme;
 use crate::utils;
 use anyhow::{Context, Result};
+use bytesize;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -50,15 +52,20 @@ enum CacheLocation {
 ///
 /// Checks well-known Windows cache locations for various package managers.
 /// Uses shared calculate_dir_size for consistent size calculation.
-pub fn scan(_root: &Path, config: &Config) -> Result<CategoryResult> {
+pub fn scan(_root: &Path, config: &Config, output_mode: OutputMode) -> Result<CategoryResult> {
     let mut result = CategoryResult::default();
     let mut candidates = Vec::new();
 
     let local_appdata = env::var("LOCALAPPDATA").ok().map(PathBuf::from);
     let userprofile = env::var("USERPROFILE").ok().map(PathBuf::from);
 
+    if output_mode != OutputMode::Quiet {
+        println!("  {} Checking {} package manager cache locations...", 
+            Theme::muted("→"), CACHE_LOCATIONS.len());
+    }
+
     // 1. Collect candidate paths
-    for (_name, location) in CACHE_LOCATIONS {
+    for (name, location) in CACHE_LOCATIONS {
         let cache_path = match location {
             CacheLocation::LocalAppData(subpath) => local_appdata.as_ref().map(|p| p.join(subpath)),
             CacheLocation::LocalAppDataNested(subpaths) => local_appdata.as_ref().map(|p| {
@@ -79,7 +86,10 @@ pub fn scan(_root: &Path, config: &Config) -> Result<CategoryResult> {
 
         if let Some(cache_path) = cache_path {
             if cache_path.exists() && !config.is_excluded(&cache_path) {
-                candidates.push(cache_path);
+                candidates.push((name, cache_path));
+                if output_mode != OutputMode::Quiet {
+                    println!("    {} Found {} cache", Theme::muted("•"), name);
+                }
             }
         }
     }
@@ -87,7 +97,7 @@ pub fn scan(_root: &Path, config: &Config) -> Result<CategoryResult> {
     // 2. Calculate sizes sequentially (one parallel walk at a time)
     let mut paths_with_sizes: Vec<(PathBuf, u64)> = candidates
         .iter()
-        .map(|p| {
+        .map(|(_name, p)| {
             let size = utils::calculate_dir_size(p);
             (p.clone(), size)
         })
@@ -96,6 +106,29 @@ pub fn scan(_root: &Path, config: &Config) -> Result<CategoryResult> {
 
     // Sort by size descending
     paths_with_sizes.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Show found caches
+    if output_mode != OutputMode::Quiet && !paths_with_sizes.is_empty() {
+        println!("  {} Found {} package caches:", Theme::muted("→"), paths_with_sizes.len());
+        let show_count = match output_mode {
+            OutputMode::VeryVerbose => paths_with_sizes.len(),
+            OutputMode::Verbose => paths_with_sizes.len(),
+            OutputMode::Normal => paths_with_sizes.len().min(10),
+            OutputMode::Quiet => 0,
+        };
+        
+        for (i, (path, size)) in paths_with_sizes.iter().take(show_count).enumerate() {
+            let size_str = bytesize::to_string(*size, true);
+            println!("      {} {} ({})", Theme::muted("→"), path.display(), Theme::size(&size_str));
+            
+            if i == 9 && output_mode == OutputMode::Normal && paths_with_sizes.len() > 10 {
+                println!("      {} ... and {} more (use -v to see all)", 
+                    Theme::muted("→"), 
+                    paths_with_sizes.len() - 10);
+                break;
+            }
+        }
+    }
 
     for (path, size) in paths_with_sizes {
         result.items += 1;

@@ -1,8 +1,10 @@
 use crate::config::Config;
-use crate::output::CategoryResult;
+use crate::output::{CategoryResult, OutputMode};
 use crate::scan_events::ScanProgressEvent;
+use crate::theme::Theme;
 use crate::utils;
 use anyhow::{Context, Result};
+use bytesize;
 use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -210,7 +212,7 @@ fn scan_app_caches(base_path: &Path, known_paths: &mut HashSet<PathBuf>) -> Vec<
 /// Also scans generically for app cache directories.
 ///
 /// Optimized to calculate directory sizes in parallel.
-pub fn scan(_root: &Path, config: &Config) -> Result<CategoryResult> {
+pub fn scan(_root: &Path, config: &Config, output_mode: OutputMode) -> Result<CategoryResult> {
     let mut result = CategoryResult::default();
     let mut known_paths = HashSet::new();
     let mut candidates = Vec::new();
@@ -218,10 +220,14 @@ pub fn scan(_root: &Path, config: &Config) -> Result<CategoryResult> {
     let local_appdata = env::var("LOCALAPPDATA").ok().map(PathBuf::from);
     let appdata = env::var("APPDATA").ok().map(PathBuf::from);
 
+    if output_mode != OutputMode::Quiet {
+        println!("  {} Scanning application cache directories...", Theme::muted("→"));
+    }
+
     // 1. Collect all candidate paths first (fast IO check)
 
     // Scan known application caches
-    for (_name, location) in APP_CACHE_LOCATIONS {
+    for (name, location) in APP_CACHE_LOCATIONS {
         let cache_path = match location {
             AppCacheLocation::LocalAppDataNested(subpaths) => local_appdata.as_ref().map(|p| {
                 let mut path = p.clone();
@@ -236,6 +242,9 @@ pub fn scan(_root: &Path, config: &Config) -> Result<CategoryResult> {
             if cache_path.exists() && !config.is_excluded(&cache_path) {
                 known_paths.insert(cache_path.clone());
                 candidates.push(cache_path);
+                if output_mode != OutputMode::Quiet {
+                    println!("    {} Found {} cache", Theme::muted("•"), name);
+                }
             }
         }
     }
@@ -263,15 +272,36 @@ pub fn scan(_root: &Path, config: &Config) -> Result<CategoryResult> {
         .filter(|(_, size)| *size > 0)
         .collect();
 
-    // Sum total size
-    result.size_bytes = paths_with_sizes.iter().map(|(_, size)| *size).sum();
-    result.items = paths_with_sizes.len();
-
     // Sort by size descending
     paths_with_sizes.sort_by(|a, b| b.1.cmp(&a.1));
 
+    // Show found caches
+    if output_mode != OutputMode::Quiet && !paths_with_sizes.is_empty() {
+        println!("  {} Found {} application caches:", Theme::muted("→"), paths_with_sizes.len());
+        let show_count = match output_mode {
+            OutputMode::VeryVerbose => paths_with_sizes.len(),
+            OutputMode::Verbose => paths_with_sizes.len(),
+            OutputMode::Normal => paths_with_sizes.len().min(10),
+            OutputMode::Quiet => 0,
+        };
+        
+        for (i, (path, size)) in paths_with_sizes.iter().take(show_count).enumerate() {
+            let size_str = bytesize::to_string(*size, true);
+            println!("      {} {} ({})", Theme::muted("→"), path.display(), Theme::size(&size_str));
+            
+            if i == 9 && output_mode == OutputMode::Normal && paths_with_sizes.len() > 10 {
+                println!("      {} ... and {} more (use -v to see all)", 
+                    Theme::muted("→"), 
+                    paths_with_sizes.len() - 10);
+                break;
+            }
+        }
+    }
+
     // Store paths
-    result.paths = paths_with_sizes.into_iter().map(|(p, _)| p).collect();
+    result.paths = paths_with_sizes.iter().map(|(p, _)| p.clone()).collect();
+    result.size_bytes = paths_with_sizes.iter().map(|(_, size)| *size).sum();
+    result.items = paths_with_sizes.len();
 
     Ok(result)
 }

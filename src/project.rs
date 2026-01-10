@@ -5,6 +5,12 @@ use jwalk::WalkDir;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+
+// Thread-local cache for project active status to avoid repeated file system checks
+thread_local! {
+    static PROJECT_ACTIVE_CACHE: RefCell<std::collections::HashMap<(PathBuf, u64), bool>> = RefCell::new(std::collections::HashMap::new());
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectType {
@@ -93,7 +99,31 @@ fn get_marker_file(path: &Path, project_type: ProjectType) -> Option<PathBuf> {
 
 /// Check if a project is active (recently modified or has uncommitted changes)
 /// Uses smart heuristics to check multiple indicators of recent activity
+///
+/// PERFORMANCE: Caches results per (project_path, age_days) to avoid repeated
+/// expensive file system checks when scanning many files in the same project.
 pub fn is_project_active(path: &Path, age_days: u64) -> Result<bool> {
+    // Normalize path for cache key (use absolute if possible)
+    let cache_key = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .ok()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|| path.to_path_buf())
+    };
+
+    // Check cache first
+    let cached_result = PROJECT_ACTIVE_CACHE.with(|cache| {
+        let cache_ref = cache.borrow();
+        cache_ref.get(&(cache_key.clone(), age_days)).copied()
+    });
+
+    if let Some(cached) = cached_result {
+        return Ok(cached);
+    }
+
+    // Not in cache - compute result
     let cutoff = Utc::now() - Duration::days(age_days as i64);
 
     // Helper to check if file was modified within cutoff
@@ -109,11 +139,17 @@ pub fn is_project_active(path: &Path, age_days: u64) -> Result<bool> {
 
     // Check git index (file-based, no git2 needed)
     if was_modified_recently(&path.join(".git").join("index")) {
+        PROJECT_ACTIVE_CACHE.with(|cache| {
+            cache.borrow_mut().insert((cache_key, age_days), true);
+        });
         return Ok(true);
     }
 
     // Check git HEAD
     if was_modified_recently(&path.join(".git").join("HEAD")) {
+        PROJECT_ACTIVE_CACHE.with(|cache| {
+            cache.borrow_mut().insert((cache_key, age_days), true);
+        });
         return Ok(true);
     }
 
@@ -140,6 +176,9 @@ pub fn is_project_active(path: &Path, age_days: u64) -> Result<bool> {
 
     for file in &project_files {
         if was_modified_recently(&path.join(file)) {
+            PROJECT_ACTIVE_CACHE.with(|cache| {
+                cache.borrow_mut().insert((cache_key, age_days), true);
+            });
             return Ok(true);
         }
     }
@@ -157,12 +196,19 @@ pub fn is_project_active(path: &Path, age_days: u64) -> Result<bool> {
                 if source_extensions.contains(&ext.to_string_lossy().as_ref())
                     && was_modified_recently(&entry_path)
                 {
+                    PROJECT_ACTIVE_CACHE.with(|cache| {
+                        cache.borrow_mut().insert((cache_key, age_days), true);
+                    });
                     return Ok(true);
                 }
             }
         }
     }
 
+    // Project is inactive - cache and return
+    PROJECT_ACTIVE_CACHE.with(|cache| {
+        cache.borrow_mut().insert((cache_key, age_days), false);
+    });
     Ok(false) // Inactive
 }
 

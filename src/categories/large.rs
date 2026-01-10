@@ -1,9 +1,11 @@
 use crate::config::Config;
 use crate::git;
-use crate::output::CategoryResult;
+use crate::output::{CategoryResult, OutputMode};
 use crate::project;
+use crate::theme::Theme;
 use crate::utils;
 use anyhow::{Context, Result};
+use bytesize;
 use jwalk::WalkDir;
 use std::env;
 use std::path::{Path, PathBuf};
@@ -21,17 +23,24 @@ const MAX_RESULTS: usize = 100;
 /// - Sorts by size descending (biggest first)
 /// - Limits to top 100 results
 /// - Detects file types (video, archive, disk image, etc.)
-pub fn scan(_root: &Path, min_size_bytes: u64, config: &Config) -> Result<CategoryResult> {
+pub fn scan(_root: &Path, min_size_bytes: u64, config: &Config, output_mode: OutputMode) -> Result<CategoryResult> {
     let mut result = CategoryResult::default();
 
     // Get user directories to scan
     let user_dirs = get_user_directories()?;
 
+    if output_mode != OutputMode::Quiet && !user_dirs.is_empty() {
+        println!("  {} Scanning {} directories for large files...", Theme::muted("→"), user_dirs.len());
+    }
+
     // Collect files with sizes for sorting
     let mut files_with_sizes: Vec<(PathBuf, u64)> = Vec::new();
 
-    for dir in user_dirs {
-        scan_directory(&dir, min_size_bytes, &mut files_with_sizes, config)?;
+    for dir in &user_dirs {
+        if output_mode != OutputMode::Quiet {
+            println!("    {} Scanning {}", Theme::muted("•"), dir.display());
+        }
+        scan_directory(dir, min_size_bytes, &mut files_with_sizes, config, output_mode)?;
     }
 
     // Sort by size descending (biggest first)
@@ -39,6 +48,29 @@ pub fn scan(_root: &Path, min_size_bytes: u64, config: &Config) -> Result<Catego
 
     // Limit results
     files_with_sizes.truncate(MAX_RESULTS);
+
+    // Show found files
+    if output_mode != OutputMode::Quiet && !files_with_sizes.is_empty() {
+        println!("  {} Found {} large files:", Theme::muted("→"), files_with_sizes.len());
+        let show_count = match output_mode {
+            OutputMode::VeryVerbose => files_with_sizes.len(),
+            OutputMode::Verbose => files_with_sizes.len(),
+            OutputMode::Normal => 10.min(files_with_sizes.len()),
+            OutputMode::Quiet => 0,
+        };
+        
+        for (i, (path, size)) in files_with_sizes.iter().take(show_count).enumerate() {
+            let size_str = bytesize::to_string(*size, true);
+            println!("      {} {} ({})", Theme::muted("→"), path.display(), Theme::size(&size_str));
+            
+            if i == 9 && output_mode == OutputMode::Normal && files_with_sizes.len() > 10 {
+                println!("      {} ... and {} more (use -v to see all)", 
+                    Theme::muted("→"), 
+                    files_with_sizes.len() - 10);
+                break;
+            }
+        }
+    }
 
     // Build result
     for (path, size) in files_with_sizes {
@@ -73,6 +105,7 @@ fn scan_directory(
     min_size_bytes: u64,
     files: &mut Vec<(PathBuf, u64)>,
     config: &Config,
+    _output_mode: OutputMode,
 ) -> Result<()> {
     if !dir.exists() {
         return Ok(());
@@ -175,6 +208,7 @@ fn scan_directory(
             // Skip files in active projects (using CACHED git lookup for performance)
             // This is a critical safety check to prevent deletion of files from projects
             // the user is actively working on
+            // PERFORMANCE: Both find_git_root_cached and is_project_active are now cached
             if let Some(project_root) = git::find_git_root_cached(&path) {
                 // Use project_age_days from config (defaults to 14 if not set)
                 let project_age_days = config_clone_for_each.thresholds.project_age_days;

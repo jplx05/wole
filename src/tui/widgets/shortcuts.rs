@@ -144,6 +144,11 @@ pub fn get_shortcuts(
                 vec![("Any Key", "Dashboard")]
             }
         }
+        crate::tui::state::Screen::RestoreSelection { .. } => vec![
+            ("↑↓", "Navigate"),
+            ("Enter", "Select"),
+            ("Esc/B/Q", "Back"),
+        ],
         crate::tui::state::Screen::Restore { .. } => vec![("Esc/B/Q", "Back to Dashboard")],
         crate::tui::state::Screen::DiskInsights { .. } => vec![
             ("↑↓", "Navigate"),

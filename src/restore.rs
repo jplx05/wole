@@ -2,9 +2,12 @@
 //!
 //! Provides ability to restore files from Recycle Bin using deletion history logs
 
-use crate::history::{list_logs, load_log, DeletionLog};
+use crate::history::{list_logs, load_log, DeletionLog, DeletionRecord};
 use crate::theme::Theme;
 use anyhow::{Context, Result};
+use std::collections::{HashMap, HashSet};
+use std::env;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use trash::os_limited;
 
@@ -70,6 +73,32 @@ pub fn normalize_path_for_comparison(path: &str) -> String {
     }
 }
 
+/// Check if a path is in a temporary directory
+fn is_temp_directory(path: &Path) -> bool {
+    // Normalize path for comparison
+    let path_normalized = normalize_path_for_comparison(&path.display().to_string());
+    
+    // Check %TEMP%
+    if let Ok(temp_dir) = env::var("TEMP") {
+        let temp_normalized = normalize_path_for_comparison(&temp_dir);
+        if path_normalized.starts_with(&temp_normalized) {
+            return true;
+        }
+    }
+    
+    // Check %LOCALAPPDATA%\Temp
+    if let Ok(local_appdata) = env::var("LOCALAPPDATA") {
+        let local_temp = PathBuf::from(&local_appdata).join("Temp");
+        let local_temp_normalized = normalize_path_for_comparison(&local_temp.display().to_string());
+        if path_normalized.starts_with(&local_temp_normalized) {
+            return true;
+        }
+    }
+    
+    // Check for common temp directory patterns
+    path_normalized.contains("/temp/") || path_normalized.contains("/tmp/")
+}
+
 /// Restore files from a specific deletion log
 pub fn restore_from_log(
     log: &DeletionLog,
@@ -79,6 +108,7 @@ pub fn restore_from_log(
 }
 
 /// Restore files from a specific deletion log with progress callback
+/// Uses bulk restore operations for better performance on Windows
 pub fn restore_from_log_with_progress(
     log: &DeletionLog,
     output_mode: crate::output::OutputMode,
@@ -99,62 +129,36 @@ pub fn restore_from_log_with_progress(
     // Create a map of Recycle Bin items by original path
     // Windows Recycle Bin stores files with their original paths in metadata
     // Use normalized paths for better matching
-    let mut bin_map: std::collections::HashMap<String, &trash::TrashItem> =
-        std::collections::HashMap::new();
+    let mut bin_map: HashMap<String, trash::TrashItem> = HashMap::new();
     for item in &recycle_bin_items {
         // Try to match by original parent + name
         let original_path = item.original_parent.join(&item.name);
         let normalized = normalize_path_for_comparison(&original_path.display().to_string());
-        bin_map.insert(normalized, item);
+        bin_map.insert(normalized, item.clone());
     }
 
-    // Try to restore each successful deletion record
+    // Collect all items to restore (for bulk operation)
+    // Structure: (record, trash_item, size_bytes)
+    let mut items_to_restore: Vec<(&DeletionRecord, trash::TrashItem, u64)> = Vec::new();
+    let mut record_to_items: HashMap<String, Vec<(&DeletionRecord, trash::TrashItem, u64)>> =
+        HashMap::new();
+
+    // First pass: collect all items that need to be restored
     for record in &log.records {
         if !record.success || record.permanent {
             // Skip failed deletions and permanent deletions (can't restore those)
             continue;
         }
 
-        let record_path = PathBuf::from(&record.path);
         let normalized_record_path = normalize_path_for_comparison(&record.path);
-
-        // Update progress callback
-        if let Some(ref mut callback) = progress_callback {
-            callback(
-                Some(&record_path),
-                result.restored,
-                total_to_restore,
-                result.errors,
-                result.not_found,
-            )?;
-        }
 
         // Try to find exact match first (for files)
         if let Some(trash_item) = bin_map.get(&normalized_record_path) {
-            match restore_file(trash_item) {
-                Ok(()) => {
-                    result.restored += 1;
-                    result.restored_bytes += record.size_bytes;
-                    if output_mode != crate::output::OutputMode::Quiet {
-                        println!(
-                            "{} Restored: {}",
-                            Theme::success("✓"),
-                            Theme::secondary(&record.path)
-                        );
-                    }
-                }
-                Err(e) => {
-                    result.errors += 1;
-                    if output_mode != crate::output::OutputMode::Quiet {
-                        eprintln!(
-                            "{} Failed to restore {}: {}",
-                            Theme::error("✗"),
-                            Theme::secondary(&record.path),
-                            Theme::error(&e.to_string())
-                        );
-                    }
-                }
-            }
+            items_to_restore.push((record, trash_item.clone(), record.size_bytes));
+            record_to_items
+                .entry(record.path.clone())
+                .or_insert_with(Vec::new)
+                .push((record, trash_item.clone(), record.size_bytes));
         } else {
             // No exact match - check if this was a directory
             // When a directory is deleted, Windows Recycle Bin stores individual files,
@@ -168,62 +172,209 @@ pub fn restore_from_log_with_progress(
 
             // Find all Recycle Bin items that are children of this directory
             let mut found_any = false;
-            let mut restored_count = 0;
-            let mut restore_errors = 0;
-
             for (bin_path, trash_item) in &bin_map {
                 // Check if this Recycle Bin item is inside the directory we're restoring
                 if bin_path.starts_with(&normalized_record_path_with_sep) {
                     found_any = true;
-                    match restore_file(trash_item) {
-                        Ok(()) => {
-                            restored_count += 1;
-                            // Size tracking removed - TrashItem doesn't expose size
-                            // Final size will use record.size_bytes (see line 210)
-                        }
-                        Err(e) => {
-                            restore_errors += 1;
-                            if output_mode != crate::output::OutputMode::Quiet {
-                                eprintln!(
-                                    "{} Failed to restore {}: {}",
-                                    Theme::error("✗"),
-                                    Theme::secondary(
-                                        &trash_item
-                                            .original_parent
-                                            .join(&trash_item.name)
-                                            .display()
-                                            .to_string()
-                                    ),
-                                    Theme::error(&e.to_string())
-                                );
-                            }
-                        }
-                    }
+                    // For directory items, we don't have individual sizes, so use 0
+                    // The total will be tracked via record.size_bytes
+                    items_to_restore.push((record, trash_item.clone(), 0));
+                    record_to_items
+                        .entry(record.path.clone())
+                        .or_insert_with(Vec::new)
+                        .push((record, trash_item.clone(), 0));
                 }
             }
 
-            if found_any {
-                if restored_count > 0 {
-                    result.restored += 1; // Count as one directory restored
-                    result.restored_bytes += record.size_bytes; // Use the logged size
-                    if output_mode != crate::output::OutputMode::Quiet {
-                        println!(
-                            "{} Restored directory: {} ({} items)",
-                            Theme::success("✓"),
-                            Theme::secondary(&record.path),
-                            restored_count
-                        );
-                    }
-                }
-                result.errors += restore_errors;
-            } else {
-                // File/directory not found in Recycle Bin (may have been permanently deleted or already restored)
+            if !found_any {
                 result.not_found += 1;
                 if output_mode == crate::output::OutputMode::VeryVerbose {
                     println!(
                         "{} Not found in Recycle Bin: {}",
                         Theme::muted("?"),
                         Theme::secondary(&record.path)
+                    );
+                }
+            }
+        }
+    }
+
+    if items_to_restore.is_empty() {
+        // Final progress update
+        if let Some(ref mut callback) = progress_callback {
+            callback(
+                None,
+                result.restored,
+                total_to_restore,
+                result.errors,
+                result.not_found,
+            )?;
+        }
+        return Ok(result);
+    }
+
+    // Restore in batches for better performance
+    // Windows can be slow with many individual restore operations
+    const BATCH_SIZE: usize = 100;
+
+    // Inform user about bulk restore operation
+    let spinner = if output_mode != crate::output::OutputMode::Quiet {
+        Some(crate::progress::create_spinner(&format!(
+            "Restoring {} items in bulk (batches of {})...",
+            items_to_restore.len(),
+            BATCH_SIZE
+        )))
+    } else {
+        None
+    };
+
+    // Create all parent directories before bulk restore
+    let mut parent_dirs: HashSet<PathBuf> = HashSet::new();
+    for (_, trash_item, _) in &items_to_restore {
+        let dest = trash_item.original_parent.join(&trash_item.name);
+        if let Some(parent) = dest.parent() {
+            parent_dirs.insert(PathBuf::from(parent));
+        }
+    }
+
+    for parent in &parent_dirs {
+        if !parent.exists() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                if output_mode != crate::output::OutputMode::Quiet {
+                    eprintln!(
+                        "[WARNING] Failed to create parent directory {}: {}",
+                        Theme::secondary(&parent.display().to_string()),
+                        Theme::error(&e.to_string())
+                    );
+                }
+            }
+        }
+    }
+    let mut restored_records: HashSet<String> = HashSet::new();
+    let mut processed_count = 0;
+
+    let total_batches = (items_to_restore.len() + BATCH_SIZE - 1) / BATCH_SIZE;
+    let mut batch_num = 0;
+
+    for batch in items_to_restore.chunks(BATCH_SIZE) {
+        batch_num += 1;
+        let batch_items: Vec<trash::TrashItem> = batch
+            .iter()
+            .map(|(_record, item, _size): &(&DeletionRecord, trash::TrashItem, u64)| item.clone())
+            .collect();
+        
+        // Show batch progress
+        if output_mode != crate::output::OutputMode::Quiet && output_mode != crate::output::OutputMode::VeryVerbose {
+            print!("\rProcessing batch {}/{}...", batch_num, total_batches);
+            std::io::stdout().flush().ok();
+        }
+        
+        // Update progress callback
+        if let Some(ref mut callback) = progress_callback {
+            if let Some((record, _, _)) = batch.first() {
+                callback(
+                    Some(Path::new(&record.path)),
+                    processed_count,
+                    total_to_restore,
+                    result.errors,
+                    result.not_found,
+                )?;
+            }
+        }
+
+        // Try bulk restore
+        match os_limited::restore_all(batch_items.iter().cloned()) {
+            Ok(()) => {
+                // Bulk restore succeeded - mark all records as restored
+                // Track by record path to avoid double-counting directories
+                for (record, _, _) in batch {
+                    if !restored_records.contains(&record.path) {
+                        restored_records.insert(record.path.clone());
+                        result.restored += 1;
+                        result.restored_bytes += record.size_bytes;
+                    }
+                }
+                processed_count += batch.len();
+            }
+            Err(_e) => {
+                // Bulk restore failed - fall back to individual restore
+                for (record, trash_item, _size_bytes) in batch {
+                    let dest = trash_item.original_parent.join(&trash_item.name);
+                    
+                    // Skip if destination already exists (may have been restored in partial batch success)
+                    if dest.exists() {
+                        // Count as restored if it exists (likely from partial batch success)
+                        if !restored_records.contains(&record.path) {
+                            restored_records.insert(record.path.clone());
+                            result.restored += 1;
+                            result.restored_bytes += record.size_bytes;
+                        }
+                        processed_count += 1;
+                        if output_mode == crate::output::OutputMode::VeryVerbose {
+                            println!(
+                                "{} Already exists (skipped): {}",
+                                Theme::muted("?"),
+                                Theme::secondary(&dest.display().to_string())
+                            );
+                        }
+                        continue;
+                    }
+
+                    match restore_file(&trash_item) {
+                        Ok(()) => {
+                            if !restored_records.contains(&record.path) {
+                                restored_records.insert(record.path.clone());
+                                result.restored += 1;
+                                result.restored_bytes += record.size_bytes;
+                            }
+                            processed_count += 1;
+                        }
+                        Err(err) => {
+                            result.errors += 1;
+                            if output_mode != crate::output::OutputMode::Quiet {
+                                eprintln!(
+                                    "{} Failed to restore {}: {}",
+                                    Theme::error("✗"),
+                                    Theme::secondary(&record.path),
+                                    Theme::error(&err.to_string())
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Clear spinner
+    if let Some(sp) = spinner {
+        crate::progress::finish_and_clear(&sp);
+    }
+    
+    // Clear batch progress line
+    if output_mode != crate::output::OutputMode::Quiet && output_mode != crate::output::OutputMode::VeryVerbose {
+        print!("\r{}", " ".repeat(50)); // Clear the line
+        print!("\r");
+        std::io::stdout().flush().ok();
+    }
+
+    // Print summary for each restored record
+    if output_mode != crate::output::OutputMode::Quiet {
+        for (record_path, items) in &record_to_items {
+            if restored_records.contains(record_path) {
+                let item_count: usize = items.len();
+                if item_count == 1 {
+                    println!(
+                        "{} Restored: {}",
+                        Theme::success("✓"),
+                        Theme::secondary(record_path)
+                    );
+                } else {
+                    println!(
+                        "{} Restored directory: {} ({} items)",
+                        Theme::success("✓"),
+                        Theme::secondary(record_path),
+                        item_count
                     );
                 }
             }
@@ -362,16 +513,218 @@ pub fn restore_path(path: &Path, output_mode: crate::output::OutputMode) -> Resu
     }
 }
 
+/// Restore all contents of the Recycle Bin in bulk (much faster on Windows)
+pub fn restore_all_bin(
+    output_mode: crate::output::OutputMode,
+    mut progress_callback: Option<RestoreProgressCallback>,
+) -> Result<RestoreResult> {
+    let mut result = RestoreResult::default();
+
+    // Get current Recycle Bin contents
+    let recycle_bin_items = os_limited::list().context("Failed to list Recycle Bin contents")?;
+
+    if recycle_bin_items.is_empty() {
+        if output_mode != crate::output::OutputMode::Quiet {
+            println!("{}", Theme::muted("Recycle Bin is empty. Nothing to restore."));
+        }
+        return Ok(result);
+    }
+
+    let total_items = recycle_bin_items.len();
+
+    // Restore in batches for better performance
+    // Windows can be slow with many individual restore operations
+    const BATCH_SIZE: usize = 100;
+
+    // Inform user about bulk restore operation
+    let spinner = if output_mode != crate::output::OutputMode::Quiet {
+        Some(crate::progress::create_spinner(&format!(
+            "Restoring {} items from Recycle Bin in bulk (batches of {})...",
+            total_items,
+            BATCH_SIZE
+        )))
+    } else {
+        None
+    };
+
+    // Create all parent directories before bulk restore
+    let mut parent_dirs: HashSet<PathBuf> = HashSet::new();
+    for item in &recycle_bin_items {
+        let dest = item.original_parent.join(&item.name);
+        if let Some(parent) = dest.parent() {
+            parent_dirs.insert(PathBuf::from(parent));
+        }
+    }
+
+    for parent in &parent_dirs {
+        if !parent.exists() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                if output_mode != crate::output::OutputMode::Quiet {
+                    eprintln!(
+                        "[WARNING] Failed to create parent directory {}: {}",
+                        Theme::secondary(&parent.display().to_string()),
+                        Theme::error(&e.to_string())
+                    );
+                }
+            }
+        }
+    }
+    let mut processed_count = 0;
+    let total_batches = (total_items + BATCH_SIZE - 1) / BATCH_SIZE;
+    let mut batch_num = 0;
+
+    for batch in recycle_bin_items.chunks(BATCH_SIZE) {
+        batch_num += 1;
+        
+        // Show batch progress
+        if output_mode != crate::output::OutputMode::Quiet && output_mode != crate::output::OutputMode::VeryVerbose {
+            print!("\rProcessing batch {}/{}...", batch_num, total_batches);
+            std::io::stdout().flush().ok();
+        }
+        
+        // Update progress callback
+        if let Some(ref mut callback) = progress_callback {
+            if let Some(item) = batch.first() {
+                let path = item.original_parent.join(&item.name);
+                callback(
+                    Some(&path),
+                    processed_count,
+                    total_items,
+                    result.errors,
+                    result.not_found,
+                )?;
+            }
+        }
+
+        // Try bulk restore
+        match os_limited::restore_all(batch.iter().cloned()) {
+            Ok(()) => {
+                // Bulk restore succeeded
+                for item in batch {
+                    result.restored += 1;
+                    // Try to get size from restored file
+                    let restored_path = item.original_parent.join(&item.name);
+                    if let Ok(metadata) = std::fs::metadata(&restored_path) {
+                        result.restored_bytes += metadata.len();
+                    }
+                }
+                processed_count += batch.len();
+            }
+            Err(_e) => {
+                // Bulk restore failed - fall back to individual restore
+                for item in batch {
+                    let dest = item.original_parent.join(&item.name);
+                    
+                    // Skip if destination already exists (may have been restored in partial batch success)
+                    if dest.exists() {
+                        // Count as restored if it exists (likely from partial batch success)
+                        result.restored += 1;
+                        if let Ok(metadata) = std::fs::metadata(&dest) {
+                            result.restored_bytes += metadata.len();
+                        }
+                        processed_count += 1;
+                        if output_mode == crate::output::OutputMode::VeryVerbose {
+                            println!(
+                                "{} Already exists (skipped): {}",
+                                Theme::muted("?"),
+                                Theme::secondary(&dest.display().to_string())
+                            );
+                        }
+                        continue;
+                    }
+
+                    match restore_file(&item) {
+                        Ok(()) => {
+                            result.restored += 1;
+                            // Get file size from restored file
+                            if let Ok(metadata) = std::fs::metadata(&dest) {
+                                result.restored_bytes += metadata.len();
+                            }
+                            processed_count += 1;
+                        }
+                        Err(err) => {
+                            result.errors += 1;
+                            if output_mode != crate::output::OutputMode::Quiet {
+                                eprintln!(
+                                    "{} Failed to restore {}: {}",
+                                    Theme::error("✗"),
+                                    Theme::secondary(
+                                        &item.original_parent.join(&item.name).display().to_string()
+                                    ),
+                                    Theme::error(&err.to_string())
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Clear spinner
+    if let Some(sp) = spinner {
+        crate::progress::finish_and_clear(&sp);
+    }
+
+    // Final progress update
+    if let Some(ref mut callback) = progress_callback {
+        callback(
+            None,
+            result.restored,
+            total_items,
+            result.errors,
+            result.not_found,
+        )?;
+    }
+
+    Ok(result)
+}
+
 /// Restore a single file from Recycle Bin
 pub fn restore_file(item: &trash::TrashItem) -> Result<()> {
     let dest = item.original_parent.join(&item.name);
 
-    // Create parent directory if it doesn't exist
+    // Check if parent directory exists and is accessible
     if let Some(parent) = dest.parent() {
         if !parent.exists() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create parent directory: {}", parent.display())
-            })?;
+            // Try to create the parent directory
+            match std::fs::create_dir_all(parent) {
+                Ok(()) => {
+                    // Verify parent directory was actually created
+                    if !parent.exists() {
+                        return Err(anyhow::anyhow!(
+                            "Parent directory does not exist and could not be created: {}",
+                            parent.display()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to create parent directory {}: {}",
+                        parent.display(),
+                        e
+                    ));
+                }
+            }
+        } else {
+            // Parent exists, but verify it's actually a directory and we have write access
+            match std::fs::metadata(parent) {
+                Ok(metadata) => {
+                    if !metadata.is_dir() {
+                        return Err(anyhow::anyhow!(
+                            "Parent path exists but is not a directory: {}",
+                            parent.display()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Cannot access parent directory {}: {}",
+                        parent.display(),
+                        e
+                    ));
+                }
+            }
         }
     }
 
@@ -384,10 +737,33 @@ pub fn restore_file(item: &trash::TrashItem) -> Result<()> {
     }
 
     // Move file back from Recycle Bin to original location
-    trash::os_limited::restore_all(std::iter::once(item.clone()))
-        .with_context(|| format!("Failed to restore file to {}", dest.display()))?;
-
-    Ok(())
+    // Capture the actual error from the trash crate to provide better diagnostics
+    match trash::os_limited::restore_all(std::iter::once(item.clone())) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Provide more detailed error information
+            let error_msg = format!("{}", e);
+            
+            // Check if this is a temp directory and provide helpful context
+            if is_temp_directory(&dest) {
+                // Check if the error is the Windows Recycle Bin error code
+                if error_msg.contains("0x80270022") || error_msg.contains("-2144927710") {
+                    return Err(anyhow::anyhow!(
+                        "Cannot restore to temp directory (likely cleaned up): {}\n\
+                        The original temp directory may have been deleted by Windows.\n\
+                        Temp files are typically safe to leave in the Recycle Bin.",
+                        dest.display()
+                    ));
+                }
+            }
+            
+            Err(anyhow::anyhow!(
+                "Failed to restore file to {}: {}",
+                dest.display(),
+                error_msg
+            ))
+        }
+    }
 }
 
 /// Result of a restore operation

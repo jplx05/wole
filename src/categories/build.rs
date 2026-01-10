@@ -1,6 +1,7 @@
 use crate::config::{CategoryConfig, Config};
-use crate::output::CategoryResult;
+use crate::output::{CategoryResult, OutputMode};
 use crate::project;
+use crate::theme::Theme;
 use crate::utils;
 use anyhow::{Context, Result};
 use rayon::prelude::*;
@@ -71,6 +72,7 @@ pub fn scan(
     project_age_days: u64,
     config: Option<&CategoryConfig>,
     global_config: &Config,
+    output_mode: OutputMode,
 ) -> Result<CategoryResult> {
     let mut result = CategoryResult::default();
 
@@ -85,15 +87,33 @@ pub fn scan(
         project::find_project_roots(root, global_config)
     };
 
+    // Show discovered projects
+    if output_mode != OutputMode::Quiet && !all_project_roots.is_empty() {
+        println!("  {} Found {} projects:", Theme::muted("→"), all_project_roots.len());
+    }
+
     // Filter to only inactive projects (safety feature: don't delete from active projects)
     let inactive_project_roots: Vec<PathBuf> = all_project_roots
         .par_iter()
         .filter_map(|project_root| {
             // Check if project is inactive (not recently modified)
-            match project::is_project_active(project_root, project_age_days) {
-                Ok(false) => Some(project_root.clone()), // Inactive - include it
-                Ok(true) => None,                        // Active - skip it
-                Err(_) => None, // Error checking activity - skip for safety
+            let is_active = project::is_project_active(project_root, project_age_days).unwrap_or(true);
+            
+            // Show project as it's being checked (always show in Normal+ mode)
+            if output_mode != OutputMode::Quiet {
+                let relative = utils::to_relative_path(project_root, root);
+                let status = if is_active {
+                    Theme::status_safe("active")
+                } else {
+                    Theme::status_review("inactive")
+                };
+                println!("    {} {} ({})", Theme::muted("•"), relative, status);
+            }
+            
+            if is_active {
+                None // Active - skip it
+            } else {
+                Some(project_root.clone()) // Inactive - include it
             }
         })
         .collect();
@@ -104,6 +124,29 @@ pub fn scan(
         .flat_map(|project_root| find_build_artifacts(project_root, &artifacts_to_scan))
         .filter(|p| p.exists())
         .collect();
+
+    // Show artifacts as they're found (after collection to avoid parallel counter issues)
+    if output_mode != OutputMode::Quiet && !all_artifact_paths.is_empty() {
+        println!("  {} Found {} build artifacts:", Theme::muted("→"), all_artifact_paths.len());
+        let show_count = match output_mode {
+            OutputMode::VeryVerbose => all_artifact_paths.len(),
+            OutputMode::Verbose => all_artifact_paths.len(),
+            OutputMode::Normal => 10.min(all_artifact_paths.len()),
+            OutputMode::Quiet => 0,
+        };
+        
+        for (i, artifact_path) in all_artifact_paths.iter().take(show_count).enumerate() {
+            let relative = utils::to_relative_path(artifact_path, root);
+            println!("      {} {}", Theme::muted("→"), relative);
+            
+            if i == 9 && output_mode == OutputMode::Normal && all_artifact_paths.len() > 10 {
+                println!("      {} ... and {} more (use -v to see all)", 
+                    Theme::muted("→"), 
+                    all_artifact_paths.len() - 10);
+                break;
+            }
+        }
+    }
 
     // Calculate sizes sequentially per artifact to avoid disk thrashing
     // Individually, calculate_dir_size is still parallel

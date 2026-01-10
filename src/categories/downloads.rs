@@ -1,6 +1,8 @@
 use crate::config::Config;
-use crate::output::CategoryResult;
+use crate::output::{CategoryResult, OutputMode};
+use crate::theme::Theme;
 use anyhow::{Context, Result};
+use bytesize;
 use chrono::{Duration, Utc};
 use std::env;
 use std::path::{Path, PathBuf};
@@ -17,7 +19,7 @@ const MAX_RESULTS: usize = 200;
 /// - Sorts by size descending (biggest files first)
 /// - Limits to top 200 results
 /// - No git checks needed (Downloads is never a git repo)
-pub fn scan(_root: &Path, min_age_days: u64, config: &Config) -> Result<CategoryResult> {
+pub fn scan(_root: &Path, min_age_days: u64, config: &Config, output_mode: OutputMode) -> Result<CategoryResult> {
     let mut result = CategoryResult::default();
 
     let cutoff = Utc::now() - Duration::days(min_age_days as i64);
@@ -31,6 +33,11 @@ pub fn scan(_root: &Path, min_age_days: u64, config: &Config) -> Result<Category
 
     if !downloads_path.exists() {
         return Ok(result); // Downloads folder doesn't exist
+    }
+
+    if output_mode != OutputMode::Quiet {
+        println!("  {} Scanning Downloads folder for files older than {} days...", 
+            Theme::muted("→"), min_age_days);
     }
 
     // Collect files with sizes for sorting
@@ -95,6 +102,30 @@ pub fn scan(_root: &Path, min_age_days: u64, config: &Config) -> Result<Category
 
     // Limit results
     files_with_sizes.truncate(MAX_RESULTS);
+
+    // Show found files
+    if output_mode != OutputMode::Quiet && !files_with_sizes.is_empty() {
+        println!("  {} Found {} old files in Downloads:", Theme::muted("→"), files_with_sizes.len());
+        let show_count = match output_mode {
+            OutputMode::VeryVerbose => files_with_sizes.len(),
+            OutputMode::Verbose => files_with_sizes.len(),
+            OutputMode::Normal => 10.min(files_with_sizes.len()),
+            OutputMode::Quiet => 0,
+        };
+        
+        for (i, (path, size)) in files_with_sizes.iter().take(show_count).enumerate() {
+            let size_str = bytesize::to_string(*size, true);
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            println!("      {} {} ({})", Theme::muted("→"), file_name, Theme::size(&size_str));
+            
+            if i == 9 && output_mode == OutputMode::Normal && files_with_sizes.len() > 10 {
+                println!("      {} ... and {} more (use -v to see all)", 
+                    Theme::muted("→"), 
+                    files_with_sizes.len() - 10);
+                break;
+            }
+        }
+    }
 
     // Build result
     for (path, size) in files_with_sizes {

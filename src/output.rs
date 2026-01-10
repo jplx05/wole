@@ -1,6 +1,10 @@
+use crate::cli::ScanOptions;
 use crate::theme::Theme;
 use serde::Serialize;
 use std::path::PathBuf;
+
+// Forward declaration for duplicate groups
+pub use crate::categories::duplicates::DuplicateGroup;
 
 /// Output verbosity mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +29,8 @@ pub struct ScanResults {
     pub system: CategoryResult,
     pub empty: CategoryResult,
     pub duplicates: CategoryResult,
+    /// Optional duplicate groups for enhanced display (only populated for duplicates category)
+    pub duplicates_groups: Option<Vec<DuplicateGroup>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -80,6 +86,10 @@ struct JsonSummary {
 }
 
 pub fn print_human(results: &ScanResults, mode: OutputMode) {
+    print_human_with_options(results, mode, None)
+}
+
+pub fn print_human_with_options(results: &ScanResults, mode: OutputMode, options: Option<&ScanOptions>) {
     if mode == OutputMode::Quiet {
         return;
     }
@@ -131,25 +141,76 @@ pub fn print_human(results: &ScanResults, mode: OutputMode) {
                 status_colored
             );
 
-            // In verbose mode, show first few paths
-            if mode == OutputMode::Verbose && !result.paths.is_empty() {
-                let show_count = std::cmp::min(3, result.paths.len());
-                for path in result.paths.iter().take(show_count) {
-                    println!("  {}", Theme::muted(&path.display().to_string()));
+            // Special handling for duplicates: show groups in verbose mode
+            if name == "Duplicates" && (mode == OutputMode::Verbose || mode == OutputMode::VeryVerbose) {
+                if let Some(ref groups) = results.duplicates_groups {
+                    let show_groups = if mode == OutputMode::Verbose {
+                        std::cmp::min(5, groups.len())
+                    } else {
+                        groups.len()
+                    };
+                    
+                    for (idx, group) in groups.iter().take(show_groups).enumerate() {
+                        println!("  {} Group {} ({} files, {} each):", 
+                            Theme::muted("└─"),
+                            idx + 1,
+                            group.paths.len(),
+                            bytesize::to_string(group.size, true)
+                        );
+                        for path in &group.paths {
+                            println!("     {}", Theme::muted(&path.display().to_string()));
+                        }
+                    }
+                    
+                    if groups.len() > show_groups {
+                        println!(
+                            "  {} ... and {} more groups",
+                            Theme::muted(""),
+                            Theme::muted(&(groups.len() - show_groups).to_string())
+                        );
+                    }
+                } else {
+                    // Fallback to regular path display if groups not available
+                    if mode == OutputMode::Verbose && !result.paths.is_empty() {
+                        let show_count = std::cmp::min(3, result.paths.len());
+                        for path in result.paths.iter().take(show_count) {
+                            println!("  {}", Theme::muted(&path.display().to_string()));
+                        }
+                        if result.paths.len() > show_count {
+                            println!(
+                                "  {} ... and {} more",
+                                Theme::muted(""),
+                                Theme::muted(&(result.paths.len() - show_count).to_string())
+                            );
+                        }
+                    } else if mode == OutputMode::VeryVerbose {
+                        for path in &result.paths {
+                            println!("  {}", Theme::muted(&path.display().to_string()));
+                        }
+                    }
                 }
-                if result.paths.len() > show_count {
-                    println!(
-                        "  {} ... and {} more",
-                        Theme::muted(""),
-                        Theme::muted(&(result.paths.len() - show_count).to_string())
-                    );
+            } else {
+                // Regular path display for other categories
+                // In verbose mode, show first few paths
+                if mode == OutputMode::Verbose && !result.paths.is_empty() {
+                    let show_count = std::cmp::min(3, result.paths.len());
+                    for path in result.paths.iter().take(show_count) {
+                        println!("  {}", Theme::muted(&path.display().to_string()));
+                    }
+                    if result.paths.len() > show_count {
+                        println!(
+                            "  {} ... and {} more",
+                            Theme::muted(""),
+                            Theme::muted(&(result.paths.len() - show_count).to_string())
+                        );
+                    }
                 }
-            }
 
-            // In very verbose mode, show all paths
-            if mode == OutputMode::VeryVerbose {
-                for path in &result.paths {
-                    println!("  {}", Theme::muted(&path.display().to_string()));
+                // In very verbose mode, show all paths
+                if mode == OutputMode::VeryVerbose {
+                    for path in &result.paths {
+                        println!("  {}", Theme::muted(&path.display().to_string()));
+                    }
                 }
             }
         }
@@ -196,12 +257,90 @@ pub fn print_human(results: &ScanResults, mode: OutputMode) {
             Theme::success("Reclaimable")
         );
         println!();
+        let clean_command = build_clean_command(options);
         println!(
             "Run {} to remove these files.",
-            Theme::command("wole clean --all")
+            Theme::command(&clean_command)
         );
     }
     println!();
+}
+
+/// Build a clean command based on the scan options used
+fn build_clean_command(options: Option<&ScanOptions>) -> String {
+    let Some(opts) = options else {
+        return "wole clean --all".to_string();
+    };
+
+    // Count how many categories are enabled
+    let enabled_count = [
+        opts.cache,
+        opts.app_cache,
+        opts.temp,
+        opts.trash,
+        opts.build,
+        opts.downloads,
+        opts.large,
+        opts.old,
+        opts.browser,
+        opts.system,
+        opts.empty,
+        opts.duplicates,
+    ]
+    .iter()
+    .filter(|&&x| x)
+    .count();
+
+    // If all categories are enabled, use --all
+    if enabled_count == 12 {
+        return "wole clean --all".to_string();
+    }
+
+    // Build command with specific flags
+    let mut flags = Vec::new();
+    if opts.cache {
+        flags.push("--cache");
+    }
+    if opts.app_cache {
+        flags.push("--app-cache");
+    }
+    if opts.temp {
+        flags.push("--temp");
+    }
+    if opts.trash {
+        flags.push("--trash");
+    }
+    if opts.build {
+        flags.push("--build");
+    }
+    if opts.downloads {
+        flags.push("--downloads");
+    }
+    if opts.large {
+        flags.push("--large");
+    }
+    if opts.old {
+        flags.push("--old");
+    }
+    if opts.browser {
+        flags.push("--browser");
+    }
+    if opts.system {
+        flags.push("--system");
+    }
+    if opts.empty {
+        flags.push("--empty");
+    }
+    if opts.duplicates {
+        flags.push("--duplicates");
+    }
+
+    // If no flags (shouldn't happen, but be safe), fall back to --all
+    if flags.is_empty() {
+        return "wole clean --all".to_string();
+    }
+
+    format!("wole clean {}", flags.join(" "))
 }
 
 pub fn print_json(results: &ScanResults) -> anyhow::Result<()> {
@@ -430,6 +569,73 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
             format_number(result.items as u64),
             result.size_human()
         );
+
+        // Special handling for duplicates: show groups in verbose mode
+        if *name == "Duplicates" && (mode == OutputMode::Verbose || mode == OutputMode::VeryVerbose) {
+            if let Some(ref groups) = results.duplicates_groups {
+                let show_groups = if mode == OutputMode::Verbose {
+                    std::cmp::min(5, groups.len())
+                } else {
+                    groups.len()
+                };
+                
+                for (idx, group) in groups.iter().take(show_groups).enumerate() {
+                    println!("  {} Group {} ({} files, {} each):", 
+                        Theme::muted("└─"),
+                        idx + 1,
+                        group.paths.len(),
+                        bytesize::to_string(group.size, true)
+                    );
+                    for path in &group.paths {
+                        println!("     {}", Theme::muted(&path.display().to_string()));
+                    }
+                }
+                
+                if groups.len() > show_groups {
+                    println!(
+                        "  {} ... and {} more groups",
+                        Theme::muted(""),
+                        Theme::muted(&(groups.len() - show_groups).to_string())
+                    );
+                }
+            } else {
+                // Fallback to regular path display if groups not available
+                if mode == OutputMode::Verbose && !result.paths.is_empty() {
+                    let show_count = std::cmp::min(3, result.paths.len());
+                    for path in result.paths.iter().take(show_count) {
+                        println!("  {}", Theme::muted(&path.display().to_string()));
+                    }
+                    if result.paths.len() > show_count {
+                        println!(
+                            "  {} ... and {} more",
+                            Theme::muted(""),
+                            Theme::muted(&(result.paths.len() - show_count).to_string())
+                        );
+                    }
+                } else if mode == OutputMode::VeryVerbose {
+                    for path in &result.paths {
+                        println!("  {}", Theme::muted(&path.display().to_string()));
+                    }
+                }
+            }
+        } else if (mode == OutputMode::Verbose || mode == OutputMode::VeryVerbose) && !result.paths.is_empty() {
+            // Show paths for other categories in verbose mode
+            let show_count = if mode == OutputMode::Verbose {
+                std::cmp::min(3, result.paths.len())
+            } else {
+                result.paths.len()
+            };
+            for path in result.paths.iter().take(show_count) {
+                println!("  {}", Theme::muted(&path.display().to_string()));
+            }
+            if result.paths.len() > show_count && mode == OutputMode::Verbose {
+                println!(
+                    "  {} ... and {} more",
+                    Theme::muted(""),
+                    Theme::muted(&(result.paths.len() - show_count).to_string())
+                );
+            }
+        }
     }
 
     // Calculate totals
@@ -511,17 +717,38 @@ pub fn print_disk_insights(
     // Show top folders
     for (i, folder) in top_folders.iter().enumerate() {
         let num = i + 1;
-        let bar = render_progress_bar(folder.percentage, 20);
         let size_str = bytesize::to_string(folder.size, true);
         let files_str = format_number(folder.file_count);
+
+        // Get display name - use relative path from root if it's deeper than one level
+        let display_name = if folder.path != root_path && folder.path.starts_with(root_path) {
+            // Show relative path from root (e.g., "OneDrive/Pictures" instead of just "Pictures")
+            folder.path.strip_prefix(root_path)
+                .map(|p| {
+                    // Remove leading separator and normalize
+                    p.to_string_lossy().replace('\\', "/").trim_start_matches('/').to_string()
+                })
+                .unwrap_or_else(|_| folder.name.clone())
+        } else {
+            folder.name.clone()
+        };
+
+        // Calculate percentage relative to root total (for expanded directories, 
+        // folder.percentage is relative to its parent, not the root)
+        let root_percentage = if insights.total_size > 0 {
+            (folder.size as f64 / insights.total_size as f64) * 100.0
+        } else {
+            0.0
+        };
+        let bar = render_progress_bar(root_percentage, 20);
 
         println!(
             "{}  {}  {}  {}  {}  {}",
             Theme::value(&num.to_string()),
             bar,
-            Theme::value(&format!("{:.1}%", folder.percentage)),
+            Theme::value(&format!("{:.1}%", root_percentage)),
             Theme::size(&size_str),
-            Theme::category(&folder.name),
+            Theme::category(&display_name),
             Theme::muted(&format!("({} files)", files_str))
         );
     }
