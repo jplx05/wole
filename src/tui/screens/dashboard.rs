@@ -59,6 +59,7 @@ fn render_actions(f: &mut Frame, area: Rect, app_state: &AppState) {
         ("Analyze", "Explore disk usage (folder sizes)"),
         ("Restore", "Restore files from deletion or Recycle Bin"),
         ("Config", "View or modify settings"),
+        ("Optimize", "Optimize Windows system performance"),
     ];
 
     let items: Vec<ListItem> = actions
@@ -130,7 +131,7 @@ fn render_content(f: &mut Frame, area: Rect, app_state: &AppState, _is_small: bo
         .constraints([
             Constraint::Length(1), // Title
             Constraint::Length(1), // Spacing
-            Constraint::Min(12),   // Actions list - enough for all 5 actions (each is 2 lines)
+            Constraint::Min(14),   // Actions list - enough for all 6 actions (each is 2 lines)
         ])
         .split(chunks[0]);
 

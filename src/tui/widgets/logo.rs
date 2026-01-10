@@ -145,19 +145,12 @@ pub fn render_tagline(f: &mut Frame, area: Rect) {
     // So tagline starts at area.y + 1 + LOGO_HEIGHT
     let tagline_y = area.y + 1 + LOGO_HEIGHT;
 
-    // Create hyperlink using OSC 8 escape sequences for terminal hyperlink support
-    // Format: \x1b]8;;URL\x1b\\TEXT\x1b]8;;\x1b\\
-    let url = "https://github.com/jpaulpoliquit/wole";
-    let link_text = "jpaulpoliquit/wole";
-    let hyperlink = format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", url, link_text);
-
     // Logo has 2 leading spaces, so add 2 spaces to tagline to align visually
-    // Combine secondary color with underline for the link
-    let link_style = Styles::secondary().add_modifier(Modifier::UNDERLINED);
+    // Use plain text instead of hyperlink to avoid terminal auto-detection issues
     let tagline = Paragraph::new(Line::from(vec![
         Span::styled("  Reclaim disk space on Windows", Styles::secondary()),
         Span::styled(" • ", Styles::secondary()),
-        Span::styled(hyperlink, link_style),
+        Span::styled("jpaulpoliquit/wole", Styles::secondary()),
     ]))
     .alignment(Alignment::Left);
 
@@ -174,12 +167,11 @@ pub fn render_tagline(f: &mut Frame, area: Rect) {
 pub fn render_tagline_centered(f: &mut Frame, area: Rect) {
     let tagline_y = area.y + 1 + LOGO_HEIGHT;
 
-    // Combine secondary color with underline for the link
-    let link_style = Styles::secondary().add_modifier(Modifier::UNDERLINED);
+    // Use plain text instead of hyperlink to avoid terminal auto-detection issues
     let tagline = Paragraph::new(Line::from(vec![
         Span::styled("Reclaim disk space on Windows", Styles::secondary()),
         Span::styled(" • ", Styles::secondary()),
-        Span::styled("jpaulpoliquit/wole", link_style),
+        Span::styled("jpaulpoliquit/wole", Styles::secondary()),
     ]))
     .alignment(Alignment::Center);
 

@@ -46,6 +46,9 @@ pub fn handle_event(
         crate::tui::state::Screen::DiskInsights { .. } => {
             handle_disk_insights_event(app_state, key, modifiers)
         }
+        crate::tui::state::Screen::Optimize { .. } => {
+            handle_optimize_event(app_state, key, modifiers)
+        }
     }
 }
 
@@ -72,6 +75,9 @@ pub fn handle_mouse_event(app_state: &mut AppState, mouse: MouseEvent) -> EventR
             crate::tui::state::Screen::DiskInsights { .. } => {
                 handle_disk_insights_event(app_state, KeyCode::Down, KeyModifiers::empty())
             }
+            crate::tui::state::Screen::Optimize { .. } => {
+                handle_optimize_event(app_state, KeyCode::Down, KeyModifiers::empty())
+            }
             _ => EventResult::Continue,
         },
         MouseEventKind::ScrollUp => match app_state.screen {
@@ -93,6 +99,9 @@ pub fn handle_mouse_event(app_state: &mut AppState, mouse: MouseEvent) -> EventR
             crate::tui::state::Screen::DiskInsights { .. } => {
                 handle_disk_insights_event(app_state, KeyCode::Up, KeyModifiers::empty())
             }
+            crate::tui::state::Screen::Optimize { .. } => {
+                handle_optimize_event(app_state, KeyCode::Up, KeyModifiers::empty())
+            }
             _ => EventResult::Continue,
         },
         MouseEventKind::Down(MouseButton::Left) => match app_state.screen {
@@ -107,6 +116,9 @@ pub fn handle_mouse_event(app_state: &mut AppState, mouse: MouseEvent) -> EventR
             }
             crate::tui::state::Screen::Config => {
                 handle_config_click(app_state, mouse.row, mouse.column)
+            }
+            crate::tui::state::Screen::Optimize { .. } => {
+                handle_optimize_click(app_state, mouse.row, mouse.column)
             }
             _ => EventResult::Continue,
         },
@@ -285,8 +297,8 @@ fn handle_dashboard_event(
         }
         KeyCode::Down => {
             if app_state.focus_actions {
-                // Navigate in actions list (5 actions: Scan, Clean, Analyze, Restore, Config)
-                if app_state.action_cursor < 4 {
+                // Navigate in actions list (6 actions: Scan, Clean, Analyze, Restore, Config, Optimize)
+                if app_state.action_cursor < 5 {
                     app_state.action_cursor += 1;
                 }
             } else {
@@ -422,6 +434,16 @@ fn handle_dashboard_event(
                     app_state.apply_config_to_state();
                     app_state.reset_config_editor();
                     app_state.screen = crate::tui::state::Screen::Config;
+                }
+                5 => {
+                    // Optimize action - show optimize screen
+                    app_state.screen = crate::tui::state::Screen::Optimize {
+                        cursor: 0,
+                        selected: std::collections::HashSet::new(),
+                        results: Vec::new(),
+                        running: false,
+                        message: None,
+                    };
                 }
                 _ => {}
             }
@@ -2167,4 +2189,275 @@ fn handle_disk_insights_event(
     } else {
         EventResult::Continue
     }
+}
+
+fn handle_optimize_event(
+    app_state: &mut AppState,
+    key: KeyCode,
+    _modifiers: KeyModifiers,
+) -> EventResult {
+    if let crate::tui::state::Screen::Optimize {
+        ref mut cursor,
+        ref mut selected,
+        ref mut results,
+        ref mut running,
+        ref mut message,
+    } = app_state.screen
+    {
+        const OPTIONS_COUNT: usize = 10;
+
+        match key {
+            KeyCode::Char('q') | KeyCode::Esc => {
+                if *running {
+                    // Can't quit while running
+                    return EventResult::Continue;
+                }
+                if !results.is_empty() {
+                    // Clear results and go back to options (so user can run more optimizations)
+                    results.clear();
+                    *cursor = 0; // Reset cursor to first option
+                    *message = None;
+                } else {
+                    // Go back to dashboard
+                    app_state.screen = crate::tui::state::Screen::Dashboard;
+                }
+                EventResult::Continue
+            }
+            KeyCode::Up => {
+                if !*running {
+                    if results.is_empty() {
+                        // Navigate in options list
+                        if *cursor > 0 {
+                            *cursor -= 1;
+                        } else {
+                            *cursor = OPTIONS_COUNT.saturating_sub(1);
+                        }
+                    } else {
+                        // Navigate in results list
+                        if *cursor > 0 {
+                            *cursor -= 1;
+                        } else {
+                            *cursor = results.len().saturating_sub(1);
+                        }
+                    }
+                }
+                EventResult::Continue
+            }
+            KeyCode::Down => {
+                if !*running {
+                    if results.is_empty() {
+                        // Navigate in options list
+                        if *cursor < OPTIONS_COUNT.saturating_sub(1) {
+                            *cursor += 1;
+                        } else {
+                            *cursor = 0;
+                        }
+                    } else {
+                        // Navigate in results list
+                        let max_idx = results.len().saturating_sub(1);
+                        if *cursor < max_idx {
+                            *cursor += 1;
+                        } else {
+                            *cursor = 0;
+                        }
+                    }
+                }
+                EventResult::Continue
+            }
+            KeyCode::Char(' ') => {
+                // Toggle selection
+                if !*running && results.is_empty() {
+                    if selected.contains(cursor) {
+                        selected.remove(cursor);
+                    } else {
+                        selected.insert(*cursor);
+                    }
+                }
+                EventResult::Continue
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                // Toggle all
+                if !*running && results.is_empty() {
+                    let all_selected = (0..OPTIONS_COUNT).all(|i| selected.contains(&i));
+                    if all_selected {
+                        selected.clear();
+                    } else {
+                        for i in 0..OPTIONS_COUNT {
+                            selected.insert(i);
+                        }
+                    }
+                }
+                EventResult::Continue
+            }
+            KeyCode::Enter => {
+                // Run selected optimizations
+                if !*running && results.is_empty() && !selected.is_empty() {
+                    *running = true;
+                    
+                    let all = selected.len() == OPTIONS_COUNT;
+                    let dns = selected.contains(&0);
+                    let thumbnails = selected.contains(&1);
+                    let icons = selected.contains(&2);
+                    let databases = selected.contains(&3);
+                    let fonts = selected.contains(&4);
+                    let memory = selected.contains(&5);
+                    let network = selected.contains(&6);
+                    let bluetooth = selected.contains(&7);
+                    let search = selected.contains(&8);
+                    let explorer = selected.contains(&9);
+
+                    // Run optimizations with quiet output (TUI will show results)
+                    // Explorer restart now uses spawn() instead of output() to avoid blocking
+                    let optimize_results = crate::optimize::run_optimizations(
+                        all, dns, thumbnails, icons, databases, fonts,
+                        memory, network, bluetooth, search, explorer,
+                        false, // dry_run
+                        false,  // yes (skip confirmation)
+                        crate::output::OutputMode::Quiet, // Quiet mode for TUI
+                    );
+
+                    *results = optimize_results;
+                    *running = false;
+                    *cursor = 0; // Reset cursor to first result
+                } else if !results.is_empty() {
+                    // When viewing results, check if user selected a failed operation
+                    if *cursor < results.len() {
+                        let selected_result = &results[*cursor];
+                        
+                        // If the selected result failed (admin or otherwise), retry it
+                        if !selected_result.success {
+                            // Map the result action back to optimization type
+                            let action_name = &selected_result.action;
+                            
+                            // Determine which optimization to run based on action name
+                            let (all, dns, thumbnails, icons, databases, fonts, memory, network, bluetooth, search, explorer) = 
+                                match action_name.as_str() {
+                                    "Flush DNS Cache" => (false, true, false, false, false, false, false, false, false, false, false),
+                                    "Clear Thumbnail Cache" => (false, false, true, false, false, false, false, false, false, false, false),
+                                    "Rebuild Icon Cache" => (false, false, false, true, false, false, false, false, false, false, false),
+                                    "Optimize Browser Databases" => (false, false, false, false, true, false, false, false, false, false, false),
+                                    "Restart Font Cache Service" => (false, false, false, false, false, true, false, false, false, false, false),
+                                    "Clear Standby Memory" => (false, false, false, false, false, false, true, false, false, false, false),
+                                    "Reset Network Stack" => (false, false, false, false, false, false, false, true, false, false, false),
+                                    "Restart Bluetooth Service" => (false, false, false, false, false, false, false, false, true, false, false),
+                                    "Restart Windows Search" => (false, false, false, false, false, false, false, false, false, true, false),
+                                    "Restart Explorer" => (false, false, false, false, false, false, false, false, false, false, true),
+                                    _ => {
+                                        // Unknown action, just go back to options
+                                        results.clear();
+                                        *cursor = 0;
+                                        *message = None;
+                                        return EventResult::Continue;
+                                    }
+                                };
+                            
+                            // Re-run just this optimization
+                            *running = true;
+                            *message = None;
+                            let single_result = crate::optimize::run_optimizations(
+                                all, dns, thumbnails, icons, databases, fonts,
+                                memory, network, bluetooth, search, explorer,
+                                false, // dry_run
+                                false,  // yes (skip confirmation)
+                                crate::output::OutputMode::Quiet, // Quiet mode for TUI
+                            );
+                            
+                            // Replace the old result with the new one
+                            if let Some(old_result) = results.get_mut(*cursor) {
+                                if let Some(new_result) = single_result.first() {
+                                    *old_result = new_result.clone();
+                                    
+                                    // If it still failed with admin required, show the PowerShell command
+                                    if new_result.requires_admin && !new_result.success {
+                                        *message = Some("Run as Admin: Start-Process wole -Verb RunAs (in PowerShell)".to_string());
+                                    }
+                                }
+                            }
+                            *running = false;
+                        } else {
+                            // Success or skipped result: go back to options to run more optimizations
+                            results.clear();
+                            *cursor = 0;
+                            *message = None;
+                        }
+                    } else {
+                        // Cursor out of bounds, go back to options
+                        results.clear();
+                        *cursor = 0;
+                        *message = None;
+                    }
+                }
+                EventResult::Continue
+            }
+            _ => EventResult::Continue,
+        }
+    } else {
+        EventResult::Continue
+    }
+}
+
+fn handle_optimize_click(app_state: &mut AppState, row: u16, _col: u16) -> EventResult {
+    if let crate::tui::state::Screen::Optimize {
+        ref mut cursor,
+        ref mut selected,
+        ref results,
+        ref running,
+        ref mut message,
+    } = app_state.screen
+    {
+        if *running {
+            // Can't interact while running
+            return EventResult::Continue;
+        }
+
+        let header_height = LOGO_WITH_TAGLINE_HEIGHT;
+        
+        // Calculate approximate positions
+        // Title: 1 line, spacing: 1 line, then list starts
+        let title_and_spacing = 2;
+        let list_start_y = header_height + title_and_spacing + 1; // +1 for border
+        
+        if row < list_start_y {
+            // Clicked above the list, ignore
+            return EventResult::Continue;
+        }
+
+        if results.is_empty() {
+            // Options mode - calculate which option was clicked
+            // Each option is 2 lines (name + description)
+            // Border adds 2 lines, padding adds 2 lines
+            let list_inner_start = list_start_y + 2; // border + padding
+            let clicked_row_in_list = row.saturating_sub(list_inner_start);
+            
+            // Each item is 2 lines, so divide by 2
+            let clicked_index = (clicked_row_in_list / 2) as usize;
+            const OPTIONS_COUNT: usize = 10;
+            
+            if clicked_index < OPTIONS_COUNT {
+                *cursor = clicked_index;
+                // Toggle selection on click
+                if selected.contains(&clicked_index) {
+                    selected.remove(&clicked_index);
+                } else {
+                    selected.insert(clicked_index);
+                }
+                // Clear any messages when interacting
+                *message = None;
+            }
+        } else {
+            // Results mode - calculate which result was clicked
+            let list_inner_start = list_start_y + 2; // border + padding
+            let clicked_row_in_list = row.saturating_sub(list_inner_start);
+            
+            // Each result is 1 line
+            let clicked_index = clicked_row_in_list as usize;
+            
+            if clicked_index < results.len() {
+                *cursor = clicked_index;
+                // Clear any messages when clicking
+                *message = None;
+            }
+        }
+    }
+    EventResult::Continue
 }

@@ -36,6 +36,7 @@ fn read_line_from_stdin() -> io::Result<String> {
 use crate::cleaner;
 use crate::config::Config;
 use crate::history;
+use crate::optimize;
 use crate::output::{self, OutputMode};
 use crate::restore;
 use crate::scanner;
@@ -62,7 +63,7 @@ use crate::uninstall;
     )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 
     /// Increase output verbosity (-v, -vv for more)
     #[arg(short = 'v', long, action = ArgAction::Count, global = true)]
@@ -113,6 +114,10 @@ pub enum Commands {
         /// Scan for files not accessed in N days
         #[arg(long)]
         old: bool,
+
+        /// Scan for installed applications (Windows only)
+        #[arg(long)]
+        applications: bool,
 
         /// Root path to scan (default: home directory)
         #[arg(long, value_name = "PATH")]
@@ -193,6 +198,10 @@ pub enum Commands {
         /// Clean duplicate files (keeps one copy)
         #[arg(long)]
         duplicates: bool,
+
+        /// Clean installed applications (Windows only)
+        #[arg(long)]
+        applications: bool,
 
         /// Root path to scan (default: home directory)
         #[arg(long, value_name = "PATH")]
@@ -310,6 +319,10 @@ pub enum Commands {
         #[arg(long)]
         duplicates: bool,
 
+        /// Scan for installed applications (Windows only)
+        #[arg(long)]
+        applications: bool,
+
         /// Root path to scan (default: user profile)
         #[arg(long, value_name = "PATH")]
         path: Option<PathBuf>,
@@ -380,6 +393,73 @@ pub enum Commands {
         #[arg(short = 'y', long = "yes")]
         yes: bool,
     },
+
+    /// Check for and install updates
+    Update {
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+
+        /// Check for updates without installing
+        #[arg(long)]
+        check: bool,
+    },
+
+    /// Optimize Windows system performance
+    #[command(visible_alias = "o")]
+    Optimize {
+        /// Run all optimizations
+        #[arg(short = 'a', long)]
+        all: bool,
+
+        /// Flush DNS cache
+        #[arg(long)]
+        dns: bool,
+
+        /// Clear thumbnail cache
+        #[arg(long)]
+        thumbnails: bool,
+
+        /// Rebuild icon cache and restart Explorer
+        #[arg(long)]
+        icons: bool,
+
+        /// Optimize browser databases (VACUUM)
+        #[arg(long)]
+        databases: bool,
+
+        /// Restart font cache service (requires admin)
+        #[arg(long)]
+        fonts: bool,
+
+        /// Clear standby memory (requires admin)
+        #[arg(long)]
+        memory: bool,
+
+        /// Reset network stack - Winsock + IP (requires admin)
+        #[arg(long)]
+        network: bool,
+
+        /// Restart Bluetooth service (requires admin)
+        #[arg(long)]
+        bluetooth: bool,
+
+        /// Restart Windows Search service (requires admin)
+        #[arg(long)]
+        search: bool,
+
+        /// Restart Windows Explorer
+        #[arg(long)]
+        explorer: bool,
+
+        /// Preview only, don't execute
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Skip confirmation for admin operations
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+    },
 }
 
 impl Cli {
@@ -442,6 +522,20 @@ impl Cli {
         println!("  {}", Theme::command("remove"));
         println!("     {} Uninstall wole from your system", Theme::muted("→"));
         println!();
+        println!("  {}", Theme::command("update"));
+        println!("     {} Check for and install updates", Theme::muted("→"));
+        println!();
+        println!(
+            "  {}  {}  {}",
+            Theme::command("optimize"),
+            Theme::muted("or"),
+            Theme::command("o"),
+        );
+        println!(
+            "     {} Optimize Windows system performance",
+            Theme::muted("→")
+        );
+        println!();
         println!("{}", Theme::divider(60));
         println!();
         println!("{}", Theme::primary("Quick Examples:"));
@@ -471,6 +565,10 @@ impl Cli {
             "  {} Restore last deletion",
             Theme::command("wole restore --last")
         );
+        println!(
+            "  {} Run all system optimizations",
+            Theme::command("wole optimize --all")
+        );
         println!();
         println!(
             "{}",
@@ -491,6 +589,12 @@ impl Cli {
         };
 
         match self.command {
+            None => {
+                // No command provided - show interactive menu
+                Self::show_interactive_menu();
+                Ok(())
+            }
+            Some(command) => match command {
             Commands::Scan {
                 all,
                 cache,
@@ -501,6 +605,7 @@ impl Cli {
                 downloads,
                 large,
                 old,
+                applications,
                 path,
                 json,
                 project_age,
@@ -518,13 +623,14 @@ impl Cli {
                     downloads,
                     large,
                     old,
+                    applications,
                     browser,
                     system,
                     empty,
                     duplicates,
                 ) = if all {
                     (
-                        true, true, true, true, true, true, true, true, true, true, true, true,
+                        true, true, true, true, true, true, true, true, true, true, true, true, true,
                     )
                 } else if !cache
                     && !app_cache
@@ -534,6 +640,7 @@ impl Cli {
                     && !downloads
                     && !large
                     && !old
+                    && !applications
                 {
                     // No categories specified - show help message
                     eprintln!("No categories specified. Use --all or specify categories like --cache, --app-cache, --temp, --build");
@@ -542,7 +649,7 @@ impl Cli {
                 } else {
                     // Scan command doesn't support browser, system, empty, duplicates
                     (
-                        cache, app_cache, temp, trash, build, downloads, large, old, false, false,
+                        cache, app_cache, temp, trash, build, downloads, large, old, applications, false, false,
                         false, false,
                     )
                 };
@@ -581,6 +688,7 @@ impl Cli {
                     downloads,
                     large,
                     old,
+                    applications,
                     browser,
                     system,
                     empty,
@@ -619,6 +727,7 @@ impl Cli {
                 system,
                 empty,
                 duplicates,
+                applications,
                 path,
                 json,
                 yes,
@@ -639,13 +748,14 @@ impl Cli {
                     downloads,
                     large,
                     old,
+                    applications,
                     browser,
                     system,
                     empty,
                     duplicates,
                 ) = if all {
                     (
-                        true, true, true, true, true, true, true, true, true, true, true, true,
+                        true, true, true, true, true, true, true, true, true, true, true, true, true,
                     )
                 } else if !cache
                     && !app_cache
@@ -659,6 +769,7 @@ impl Cli {
                     && !system
                     && !empty
                     && !duplicates
+                    && !applications
                 {
                     // No categories specified - show help message
                     eprintln!("No categories specified. Use --all or specify categories like --cache, --app-cache, --temp, --build");
@@ -666,7 +777,7 @@ impl Cli {
                     return Ok(());
                 } else {
                     (
-                        cache, app_cache, temp, trash, build, downloads, large, old, browser,
+                        cache, app_cache, temp, trash, build, downloads, large, old, applications, browser,
                         system, empty, duplicates,
                     )
                 };
@@ -707,6 +818,7 @@ impl Cli {
                     downloads,
                     large,
                     old,
+                    applications,
                     browser,
                     system,
                     empty,
@@ -753,6 +865,7 @@ impl Cli {
                 system,
                 empty,
                 duplicates,
+                applications,
                 path,
                 project_age,
                 min_age,
@@ -775,6 +888,7 @@ impl Cli {
                     || system
                     || empty
                     || duplicates
+                    || applications
                     || all;
                 let disk_mode = disk || (!has_category_flags); // Default to disk mode if no category flags
 
@@ -878,17 +992,18 @@ impl Cli {
                         downloads,
                         large,
                         old,
+                        applications,
                         browser,
                         system,
                         empty,
                         duplicates,
                     ) = if all {
                         (
-                            true, true, true, true, true, true, true, true, true, true, true, true,
+                            true, true, true, true, true, true, true, true, true, true, true, true, true,
                         )
                     } else {
                         (
-                            cache, app_cache, temp, trash, build, downloads, large, old, browser,
+                            cache, app_cache, temp, trash, build, downloads, large, old, applications, browser,
                             system, empty, duplicates,
                         )
                     };
@@ -931,6 +1046,7 @@ impl Cli {
                             downloads,
                             large,
                             old,
+                            applications,
                             browser,
                             system,
                             empty,
@@ -1288,6 +1404,54 @@ impl Cli {
                 uninstall::uninstall(config, data, output_mode)?;
                 Ok(())
             }
+            Commands::Update { yes, check } => {
+                crate::update::check_and_update(yes, check, output_mode)?;
+                Ok(())
+            }
+            Commands::Optimize {
+                all,
+                dns,
+                thumbnails,
+                icons,
+                databases,
+                fonts,
+                memory,
+                network,
+                bluetooth,
+                search,
+                explorer,
+                dry_run,
+                yes,
+            } => {
+                // Check if no options specified
+                if !all && !dns && !thumbnails && !icons && !databases && !fonts 
+                    && !memory && !network && !bluetooth && !search && !explorer {
+                    eprintln!("No optimizations specified. Use --all or specify individual options.");
+                    eprintln!("Run 'wole optimize --help' for more information.");
+                    return Ok(());
+                }
+
+                if output_mode != OutputMode::Quiet {
+                    println!();
+                    println!("{}", Theme::header("Windows System Optimization"));
+                    println!("{}", Theme::divider_bold(60));
+                    
+                    if dry_run {
+                        println!("{}", Theme::warning("DRY RUN MODE - No changes will be made"));
+                    }
+                    println!();
+                }
+
+                let results = optimize::run_optimizations(
+                    all, dns, thumbnails, icons, databases, fonts,
+                    memory, network, bluetooth, search, explorer,
+                    dry_run, yes, output_mode,
+                );
+
+                optimize::print_summary(&results, output_mode);
+                Ok(())
+            }
+            }
         }
     }
 }
@@ -1302,6 +1466,7 @@ pub struct ScanOptions {
     pub downloads: bool,
     pub large: bool,
     pub old: bool,
+    pub applications: bool,
     pub browser: bool,
     pub system: bool,
     pub empty: bool,

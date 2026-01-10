@@ -35,6 +35,9 @@ crossterm = "0.28"
 memmap2 = "0.9"
 jwalk = "0.8"              # Parallel directory traversal (2-4x faster than walkdir)
 globset = "0.4"            # Fast compiled glob patterns
+winreg = "0.52"            # Windows registry access for installed applications
+rusqlite = { version = "0.31", features = ["bundled"] }  # For SQLite VACUUM operations
+ureq = { version = "2.9", features = ["native-tls", "json"] }  # HTTP client for update checks
 
 [dev-dependencies]
 tempfile = "3.10"

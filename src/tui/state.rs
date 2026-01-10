@@ -89,6 +89,13 @@ pub enum Screen {
         cursor: usize,
         sort_by: crate::disk_usage::SortBy,
     },
+    Optimize {
+        cursor: usize,
+        selected: std::collections::HashSet<usize>,
+        results: Vec<crate::optimize::OptimizeResult>,
+        running: bool,
+        message: Option<String>,
+    },
 }
 
 /// Result of a restore operation
@@ -249,19 +256,27 @@ impl AppState {
             .map(|s| s.to_lowercase())
             .collect();
 
+        // Categories organized logically:
+        // 1. System & Browser Caches (safe, system-level)
+        // 2. Application Caches (safe, app-level)
+        // 3. Build Artifacts (safe for inactive projects)
+        // 4. System Cleanup (safe)
+        // 5. User Files (requires review)
+        // 6. Applications (requires review - uninstalling apps)
         let all_category_names = vec![
-            "Package cache",
-            "Application cache",
-            "Temp",
-            "Trash",
-            "Build",
-            "Downloads",
-            "Large",
-            "Old",
-            "Browser",
-            "System",
-            "Empty",
-            "Duplicates",
+            "System",           // System caches
+            "Browser",           // Browser caches
+            "Temp",              // System temp folders
+            "Package cache",     // Package manager caches
+            "Application cache", // Application caches
+            "Build",             // Build artifacts
+            "Trash",             // Recycle Bin contents
+            "Empty",             // Empty folders
+            "Downloads",         // Old files in Downloads
+            "Old",               // Files not accessed in X days
+            "Large",             // Files over XMB
+            "Duplicates",        // Duplicate files
+            "Applications",      // Installed applications
         ];
 
         // If config specifies default_enabled, use those; otherwise use hardcoded defaults
@@ -273,31 +288,32 @@ impl AppState {
                 let enabled = if use_config_defaults {
                     default_enabled.contains(&name.to_lowercase().replace(" ", "_"))
                 } else {
-                    // Hardcoded defaults: Package cache, Application cache, Temp, Trash, Build enabled by default
+                    // Hardcoded defaults: System, Browser, Temp, Package cache, Application cache, Trash, Build enabled by default
                     matches!(
                         *name,
-                        "Package cache" | "Application cache" | "Temp" | "Trash" | "Build"
+                        "System" | "Browser" | "Temp" | "Package cache" | "Application cache" | "Trash" | "Build"
                     )
                 };
 
                 let description = match *name {
+                    "System" => "Windows system caches".to_string(),
+                    "Browser" => "Browser caches".to_string(),
+                    "Temp" => "System temp folders".to_string(),
                     "Package cache" => "Package manager caches (npm, pip, nuget, etc.)".to_string(),
                     "Application cache" => {
                         "Application caches (Discord, VS Code, Slack, etc.)".to_string()
                     }
-                    "Temp" => "System temp folders".to_string(),
-                    "Trash" => "Recycle Bin contents".to_string(),
                     "Build" => "node_modules, target, .next".to_string(),
+                    "Trash" => "Recycle Bin contents".to_string(),
+                    "Empty" => "Empty folders".to_string(),
                     "Downloads" => "Old files in Downloads".to_string(),
-                    "Large" => format!("Files over {}MB", config.thresholds.min_size_mb),
                     "Old" => format!(
                         "Files not accessed in {} days",
                         config.thresholds.min_age_days
                     ),
-                    "Browser" => "Browser caches".to_string(),
-                    "System" => "Windows system caches".to_string(),
-                    "Empty" => "Empty folders".to_string(),
+                    "Large" => format!("Files over {}MB", config.thresholds.min_size_mb),
                     "Duplicates" => "Duplicate files".to_string(),
+                    "Applications" => "Installed applications (Windows only)".to_string(),
                     _ => "".to_string(),
                 };
 
@@ -938,6 +954,12 @@ impl AppState {
                 &results.old.paths,
                 results.old.size_bytes,
                 "Old Files",
+                false,
+            );
+            add_category(
+                &results.applications.paths,
+                results.applications.size_bytes,
+                "Installed Applications",
                 false,
             );
             add_category(

@@ -157,5 +157,66 @@ pub fn get_shortcuts(
             ("S", "Sort"),
             ("Q/Esc", "Quit"),
         ],
+        crate::tui::state::Screen::Optimize { .. } => {
+            if app_state
+                .and_then(|s| {
+                    if let crate::tui::state::Screen::Optimize { running, .. } = &s.screen {
+                        Some(*running)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(false)
+            {
+                vec![("Esc", "Cancel")]
+            } else if app_state
+                .and_then(|s| {
+                    if let crate::tui::state::Screen::Optimize { results, cursor, .. } = &s.screen {
+                        if !results.is_empty() {
+                            if let Some(result) = results.get(*cursor) {
+                                // Check if selected result is a failed operation
+                                Some(!result.success)
+                            } else {
+                                Some(false)
+                            }
+                        } else {
+                            Some(false)
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(false)
+            {
+                vec![
+                    ("↑↓", "Navigate"),
+                    ("Enter", "Retry"),
+                    ("Esc/Q", "Back to Options"),
+                ]
+            } else if app_state
+                .and_then(|s| {
+                    if let crate::tui::state::Screen::Optimize { results, .. } = &s.screen {
+                        Some(!results.is_empty())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(false)
+            {
+                vec![
+                    ("↑↓", "Navigate"),
+                    ("Enter", "Back to Options"),
+                    ("Esc/Q", "Back to Options"),
+                ]
+            } else {
+                vec![
+                    ("↑↓", "Navigate"),
+                    ("Space", "Toggle"),
+                    ("A", "Select All"),
+                    ("Enter", "Run"),
+                    ("Esc/Q", "Back"),
+                ]
+            }
+        }
     }
 }
