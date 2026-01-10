@@ -311,12 +311,94 @@ try {
             if ($woleError) {
                 Write-Host "  Error: $woleError" -ForegroundColor Red
             }
+
+            # If we hit the common "vcruntime140.dll was not found" case, try to install VC++ runtime automatically
+            $missingVCRuntime = $false
+            if ($woleError -match '(?i)vcruntime140\.dll' -or $woleError -match '(?i)msvcp140\.dll' -or $woleError -match '(?i)api-ms-win-crt') {
+                $missingVCRuntime = $true
+            }
+
+            if ($missingVCRuntime) {
+                Write-Host "" 
+                Write-Host "Missing Microsoft Visual C++ Runtime detected." -ForegroundColor Yellow
+                Write-Host "Attempting to install it now (may prompt for admin approval)..." -ForegroundColor Yellow
+
+                # Choose the correct redistributable for the current arch
+                $vcArch = "x64"
+                if ($ARCH -eq "arm64") { $vcArch = "arm64" }
+                elseif ($ARCH -eq "i686") { $vcArch = "x86" }
+
+                $vcRedistUrl = "https://aka.ms/vs/17/release/vc_redist.${vcArch}.exe"
+                $vcRedistPath = Join-Path $TEMP_DIR "vc_redist.${vcArch}.exe"
+
+                try {
+                    Write-Host "Downloading VC++ Runtime from $vcRedistUrl..." -ForegroundColor Gray
+                    Invoke-WebRequest -Uri $vcRedistUrl -OutFile $vcRedistPath -UseBasicParsing
+
+                    # Silent install; will trigger UAC if needed
+                    $proc = Start-Process -FilePath $vcRedistPath -ArgumentList "/install", "/quiet", "/norestart" -Wait -PassThru
+                    $vcExit = $proc.ExitCode
+
+                    if ($vcExit -eq 0 -or $vcExit -eq 3010) {
+                        Write-Host "✓ VC++ Runtime installed." -ForegroundColor Green
+                        if ($vcExit -eq 3010) {
+                            Write-Host "⚠ A restart may be required to complete installation." -ForegroundColor Yellow
+                        }
+
+                        # Re-test wole
+                        $woleOutput = ""
+                        $woleError = ""
+                        try {
+                            $processInfo = New-Object System.Diagnostics.ProcessStartInfo
+                            $processInfo.FileName = $TARGET_PATH
+                            $processInfo.Arguments = "--version"
+                            $processInfo.RedirectStandardOutput = $true
+                            $processInfo.RedirectStandardError = $true
+                            $processInfo.UseShellExecute = $false
+                            $processInfo.CreateNoWindow = $true
+
+                            $process = New-Object System.Diagnostics.Process
+                            $process.StartInfo = $processInfo
+                            $process.Start() | Out-Null
+                            $woleOutput = $process.StandardOutput.ReadToEnd()
+                            $woleError = $process.StandardError.ReadToEnd()
+                            $process.WaitForExit(5000) | Out-Null
+
+                            if ($process.ExitCode -eq 0) {
+                                $woleWorks = $true
+                            }
+                        } catch {
+                            $woleError = $_.Exception.Message
+                        }
+                    } else {
+                        Write-Host "⚠ VC++ Runtime installer exited with code $vcExit." -ForegroundColor Yellow
+                    }
+                } catch {
+                    Write-Host "⚠ Failed to install VC++ Runtime automatically." -ForegroundColor Yellow
+                    Write-Host "  You can install it manually by running:" -ForegroundColor Yellow
+                    Write-Host "  $vcRedistPath" -ForegroundColor White
+                    Write-Host "  (or download: $vcRedistUrl)" -ForegroundColor Gray
+                }
+
+                if ($woleWorks) {
+                    Write-Host ""
+                    Write-Host "✓ wole is ready to use!" -ForegroundColor Green
+                    if ($woleOutput) {
+                        Write-Host "  Version: $($woleOutput.Trim())" -ForegroundColor Gray
+                    }
+                    Write-Host ""
+                    Write-Host "Run 'wole --help' to get started." -ForegroundColor Cyan
+                    Write-Host ""
+                    return
+                }
+            }
+
             Write-Host ""
             Write-Host "Try running directly:" -ForegroundColor Yellow
             Write-Host "  & `"$TARGET_PATH`" --help" -ForegroundColor White
             Write-Host ""
             Write-Host "If that fails, possible causes:" -ForegroundColor Gray
-            Write-Host "  - Missing Visual C++ Runtime (install from microsoft.com)" -ForegroundColor Gray
+            Write-Host "  - Missing Visual C++ Runtime (will show vcruntime140.dll not found)" -ForegroundColor Gray
             Write-Host "  - Windows Defender blocking (check Security settings)" -ForegroundColor Gray
             Write-Host "  - Wrong architecture (ARM vs x64)" -ForegroundColor Gray
         }
