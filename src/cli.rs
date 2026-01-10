@@ -478,6 +478,10 @@ pub enum Commands {
         yes: bool,
     },
 
+    /// Debug GPU metrics collection (for troubleshooting)
+    #[command(visible_alias = "gpu-debug")]
+    DebugGpu,
+
     /// Show real-time system status dashboard
     #[command(visible_alias = "st")]
     Status {
@@ -1616,6 +1620,34 @@ impl Cli {
                     optimize::print_summary(&results, output_mode);
                     Ok(())
                 }
+                Commands::DebugGpu => {
+                    // Force debug mode
+                    std::env::set_var("WOLE_GPU_DEBUG", "1");
+                    
+                    println!("=== GPU Debug Information ===\n");
+                    println!("Collecting GPU metrics with debug output enabled...\n");
+                    
+                    // This will trigger the debug prints in status.rs
+                    if let Some(gpu) = status::gather_gpu_metrics() {
+                        println!("\n=== Collected GPU Metrics ===");
+                        println!("Name: {}", gpu.name);
+                        println!("Vendor: {}", gpu.vendor);
+                        println!("Utilization: {:?}%", gpu.utilization_percent);
+                        println!("3D Engine: {:?}%", gpu.render_engine_percent);
+                        println!("Copy Engine: {:?}%", gpu.copy_engine_percent);
+                        println!("Compute Engine: {:?}%", gpu.compute_engine_percent);
+                        println!("Video Engine: {:?}%", gpu.video_engine_percent);
+                        println!("Dedicated Memory: {:?} / {:?} MB", gpu.memory_dedicated_used_mb, gpu.memory_dedicated_total_mb);
+                        println!("Shared Memory: {:?} / {:?} MB", gpu.memory_shared_used_mb, gpu.memory_shared_total_mb);
+                        println!("Temperature: {:?}°C", gpu.temperature_celsius);
+                        println!("Temperature Threshold: {:?}°C", gpu.temperature_threshold_celsius);
+                        println!("Driver Version: {:?}", gpu.driver_version);
+                    } else {
+                        println!("\nNo GPU metrics collected.");
+                    }
+                    Ok(())
+                }
+                
                 Commands::Status { json, watch: _ } => {
                     if json {
                         // JSON output mode - use text output
