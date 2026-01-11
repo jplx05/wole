@@ -23,7 +23,7 @@ fn try_incremental_scan(
     _path: &Path,
     _config: &Config,
     cache: &mut ScanCache,
-    scan_session_id: i64,
+    _scan_session_id: i64,
     _mode: OutputMode,
 ) -> Result<Option<CategoryResult>> {
     // Get the previous category-specific scan ID (without incrementing)
@@ -44,7 +44,6 @@ fn try_incremental_scan(
 
     let mut unchanged_paths = HashSet::new();
     let mut changed_paths = Vec::new();
-    let new_paths: Vec<PathBuf> = Vec::new();
 
     for (path, status) in status_map {
         match status {
@@ -73,43 +72,24 @@ fn try_incremental_scan(
         return Ok(None);
     }
 
-    // Build result from cached paths
-    let mut result = CategoryResult::default();
-
-    for path in &unchanged_paths {
-        if let Ok(metadata) = std::fs::metadata(path) {
-            result.items += 1;
-            result.size_bytes += metadata.len();
-            result.paths.push(path.clone());
-        }
-    }
-
-    // Get the new category scan ID for updating cache
-    let new_category_scan_id = cache.get_category_scan_id(category_name, scan_session_id)?;
-
-    // Update cache with unchanged files (batch for efficiency)
-    let mut cache_updates = Vec::new();
-    for path in &unchanged_paths {
-        if let Ok(sig) = FileSignature::from_path(path, false) {
-            cache_updates.push((sig, category_name.to_string()));
-        }
-    }
-    if !cache_updates.is_empty() {
-        // Ignore cache update errors - scan can continue without cache
-        let _ = cache.upsert_files_batch(&cache_updates, new_category_scan_id);
-    }
-
-    // If there are changed/new files, we'd need to scan them
-    // For now, we'll do a full scan if there are any changes
-    // TODO: In future, could scan only changed files
-    if !changed_paths.is_empty() || !new_paths.is_empty() {
-        // Merge with full scan of changed files
-        // For simplicity, we'll just do full scan if there are changes
-        // This can be optimized later
+    // CRITICAL: We can't detect new files that weren't in the previous scan without
+    // performing a full scan. The cache check only validates previously cached paths,
+    // so any new files added to the category since the last scan won't be detected.
+    // To avoid silently omitting new files, we must force a full scan when we can't
+    // reliably detect additions. This ensures scan results are always complete.
+    //
+    // If there are changed files, we need to rescan them anyway, so fall back to full scan.
+    // Even if no files changed, we can't know if new files were added without scanning.
+    if !changed_paths.is_empty() {
+        // Changed files detected - need to rescan them
         return Ok(None);
     }
 
-    Ok(Some(result))
+    // Even with no changed files, we can't reliably detect new files that weren't
+    // previously cached. To ensure completeness, force a full scan.
+    // TODO: In future, could add a mechanism to discover new paths (e.g., quick directory
+    // traversal to detect new files) to make incremental scanning more effective.
+    return Ok(None);
 }
 
 /// Execute full category scan
