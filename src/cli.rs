@@ -1,49 +1,10 @@
-use anyhow::Context;
 use clap::{ArgAction, Parser, Subcommand};
-use std::io::{self, Write};
 use std::path::PathBuf;
 
-/// Read a line from stdin, handling terminal focus loss issues on Windows.
-/// This function ensures stdin is properly synchronized and clears any stale input
-/// before reading, which fixes issues when the terminal loses and regains focus.
-///
-/// On Windows, when a terminal loses focus and regains it, stdin can be in a
-/// problematic state. This function ensures we get a fresh stdin handle each time,
-/// which helps resolve focus-related input issues.
-fn read_line_from_stdin() -> io::Result<String> {
-    // Flush stdout to ensure prompt is visible before reading
-    io::stdout().flush()?;
+use crate::output::OutputMode;
 
-    // Always get a fresh stdin handle to avoid issues with stale locks
-    // This is especially important on Windows when the terminal loses focus
-    let mut input = String::new();
-
-    // Use BufRead for better control and proper buffering
-    use std::io::BufRead;
-
-    // Get a fresh stdin handle each time (don't reuse a locked handle)
-    // This ensures we're reading from the current terminal state
-    let stdin = io::stdin();
-    let mut handle = stdin.lock();
-
-    // Read a line - this will block until the user types and presses Enter
-    // On Windows, getting a fresh handle helps when the terminal has lost focus
-    handle.read_line(&mut input)?;
-
-    Ok(input)
-}
-
-use crate::cleaner;
-use crate::config::Config;
-use crate::history;
-use crate::optimize;
-use crate::output::{self, OutputMode};
-use crate::restore;
-use crate::scanner;
-use crate::size;
-use crate::status;
-use crate::theme::Theme;
-use crate::uninstall;
+pub mod commands;
+mod interactive_menu;
 
 #[derive(Parser)]
 #[command(name = "wole")]
@@ -520,128 +481,6 @@ impl Cli {
         <Self as Parser>::parse()
     }
 
-    /// Show interactive menu when no command is provided
-    pub fn show_interactive_menu() {
-        println!();
-        println!("{}", Theme::header("Wole - Reclaim Disk Space on Windows"));
-        println!("{}", Theme::divider_bold(60));
-        println!();
-        println!("{}", Theme::primary("Available Commands:"));
-        println!();
-        println!(
-            "  {}  {}  {}",
-            Theme::command("scan"),
-            Theme::muted("or"),
-            Theme::command("s"),
-        );
-        println!(
-            "     {} Find cleanable files (safe, dry-run)",
-            Theme::muted("→")
-        );
-        println!();
-        println!(
-            "  {}  {}  {}",
-            Theme::command("clean"),
-            Theme::muted("or"),
-            Theme::command("c"),
-        );
-        println!("     {} Delete files found by scan", Theme::muted("→"));
-        println!();
-        println!(
-            "  {}  {}  {}",
-            Theme::command("analyze"),
-            Theme::muted("or"),
-            Theme::command("a"),
-        );
-        println!(
-            "     {} Show detailed analysis with file lists",
-            Theme::muted("→")
-        );
-        println!();
-        println!("  {}", Theme::command("config"));
-        println!("     {} View or modify configuration", Theme::muted("→"));
-        println!();
-        println!(
-            "  {}  {}  {}",
-            Theme::command("restore"),
-            Theme::muted("or"),
-            Theme::command("r"),
-        );
-        println!(
-            "     {} Restore files from last deletion",
-            Theme::muted("→")
-        );
-        println!();
-        println!("  {}", Theme::command("remove"));
-        println!("     {} Uninstall wole from your system", Theme::muted("→"));
-        println!();
-        println!("  {}", Theme::command("update"));
-        println!("     {} Check for and install updates", Theme::muted("→"));
-        println!();
-        println!(
-            "  {}  {}  {}",
-            Theme::command("optimize"),
-            Theme::muted("or"),
-            Theme::command("o"),
-        );
-        println!(
-            "     {} Optimize Windows system performance",
-            Theme::muted("→")
-        );
-        println!();
-        println!(
-            "  {}  {}  {}",
-            Theme::command("status"),
-            Theme::muted("or"),
-            Theme::command("st"),
-        );
-        println!(
-            "     {} Show real-time system status dashboard",
-            Theme::muted("→")
-        );
-        println!();
-        println!("{}", Theme::divider(60));
-        println!();
-        println!("{}", Theme::primary("Quick Examples:"));
-        println!();
-        println!("  {} Launch interactive TUI mode", Theme::command("wole"));
-        println!(
-            "  {} Scan all categories",
-            Theme::command("wole scan --all")
-        );
-        println!(
-            "  {} Scan specific categories",
-            Theme::command("wole scan --cache --temp")
-        );
-        println!(
-            "  {} Clean all files",
-            Theme::command("wole clean --all -y")
-        );
-        println!(
-            "  {} Find large files",
-            Theme::command("wole scan --large --min-size 500MB")
-        );
-        println!(
-            "  {} Interactive disk insights",
-            Theme::command("wole analyze --interactive")
-        );
-        println!(
-            "  {} Restore last deletion",
-            Theme::command("wole restore --last")
-        );
-        println!(
-            "  {} Run all system optimizations",
-            Theme::command("wole optimize --all")
-        );
-        println!("  {} Show system status", Theme::command("wole status"));
-        println!();
-        println!(
-            "{}",
-            Theme::muted("Tip: Use --help with any command for detailed options")
-        );
-        println!();
-    }
-
     pub fn run(self) -> anyhow::Result<()> {
         let output_mode = if self.quiet {
             OutputMode::Quiet
@@ -678,128 +517,28 @@ impl Cli {
                     project_age,
                     min_age,
                     min_size,
-                    exclude: _,
-                } => {
-                    // --all enables all categories
-                    let (
-                        cache,
-                        app_cache,
-                        temp,
-                        trash,
-                        build,
-                        downloads,
-                        large,
-                        old,
-                        applications,
-                        browser,
-                        system,
-                        empty,
-                        duplicates,
-                        windows_update,
-                        event_logs,
-                    ) = if all {
-                        (
-                            true, true, true, true, true, true, true, true, true, true, true, true,
-                            true, true, true,
-                        )
-                    } else if !cache
-                        && !app_cache
-                        && !temp
-                        && !trash
-                        && !build
-                        && !downloads
-                        && !large
-                        && !old
-                        && !applications
-                        && !windows_update
-                        && !event_logs
-                    {
-                        // No categories specified - show help message
-                        eprintln!("No categories specified. Use --all or specify categories like --cache, --app-cache, --temp, --build");
-                        eprintln!("Run 'wole scan --help' for more information.");
-                        return Ok(());
-                    } else {
-                        // Scan command doesn't support browser, system, empty, duplicates
-                        (
-                            cache,
-                            app_cache,
-                            temp,
-                            trash,
-                            build,
-                            downloads,
-                            large,
-                            old,
-                            applications,
-                            false,
-                            false,
-                            false,
-                            false,
-                            windows_update,
-                            event_logs,
-                        )
-                    };
-
-                    // Default to current directory to avoid stack overflow from OneDrive/UserDirs
-                    // PERFORMANCE FIX: Avoid OneDrive paths which are very slow to scan on Windows
-                    // Use current directory instead, which is faster and more predictable
-                    let scan_path = path.unwrap_or_else(|| {
-                        // Use current directory as default - faster and avoids OneDrive sync issues
-                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                    });
-
-                    // Load config first
-                    let mut config = Config::load();
-
-                    // Apply CLI overrides to config
-                    config.apply_cli_overrides(
-                        Some(project_age),
-                        Some(min_age),
-                        Some(
-                            size::parse_size(&min_size).map_err(|e| {
-                                anyhow::anyhow!("Invalid size format '{}': {}", min_size, e)
-                            })? / (1024 * 1024),
-                        ), // Convert bytes to MB for config
-                    );
-
-                    // Use config values (after CLI overrides) for scan options
-                    let min_size_bytes = config.thresholds.min_size_mb * 1024 * 1024;
-
-                    let scan_options = ScanOptions {
-                        cache,
-                        app_cache,
-                        temp,
-                        trash,
-                        build,
-                        downloads,
-                        large,
-                        old,
-                        applications,
-                        browser,
-                        system,
-                        empty,
-                        duplicates,
-                        windows_update,
-                        event_logs,
-                        project_age_days: config.thresholds.project_age_days,
-                        min_age_days: config.thresholds.min_age_days,
-                        min_size_bytes,
-                    };
-
-                    let results =
-                        scanner::scan_all(&scan_path, scan_options.clone(), output_mode, &config)?;
-
-                    if json {
-                        output::print_json(&results)?;
-                    } else {
-                        output::print_human_with_options(
-                            &results,
-                            output_mode,
-                            Some(&scan_options),
-                        );
-                    }
-
-                    Ok(())
-                }
+                    exclude,
+                } => commands::scan_command::handle_scan(
+                    all,
+                    cache,
+                    app_cache,
+                    temp,
+                    trash,
+                    build,
+                    downloads,
+                    large,
+                    old,
+                    applications,
+                    windows_update,
+                    event_logs,
+                    path,
+                    json,
+                    project_age,
+                    min_age,
+                    min_size,
+                    exclude,
+                    output_mode,
+                ),
                 Commands::Clean {
                     all,
                     cache,
@@ -826,134 +565,34 @@ impl Cli {
                     exclude,
                     permanent,
                     dry_run,
-                } => {
-                    // --all enables all categories
-                    let (
-                        cache,
-                        app_cache,
-                        temp,
-                        trash,
-                        build,
-                        downloads,
-                        large,
-                        old,
-                        applications,
-                        browser,
-                        system,
-                        empty,
-                        duplicates,
-                        windows_update,
-                        event_logs,
-                    ) = if all {
-                        (
-                            true, true, true, true, true, true, true, true, true, true, true, true,
-                            true, true, true,
-                        )
-                    } else if !cache
-                        && !app_cache
-                        && !temp
-                        && !trash
-                        && !build
-                        && !downloads
-                        && !large
-                        && !old
-                        && !browser
-                        && !system
-                        && !empty
-                        && !duplicates
-                        && !applications
-                        && !windows_update
-                        && !event_logs
-                    {
-                        // No categories specified - show help message
-                        eprintln!("No categories specified. Use --all or specify categories like --cache, --app-cache, --temp, --build");
-                        eprintln!("Run 'wole clean --help' for more information.");
-                        return Ok(());
-                    } else {
-                        (
-                            cache,
-                            app_cache,
-                            temp,
-                            trash,
-                            build,
-                            downloads,
-                            large,
-                            old,
-                            applications,
-                            browser,
-                            system,
-                            empty,
-                            duplicates,
-                            windows_update,
-                            event_logs,
-                        )
-                    };
-
-                    let scan_path = path.unwrap_or_else(|| {
-                        directories::UserDirs::new()
-                            .expect("Failed to get user directory")
-                            .home_dir()
-                            .to_path_buf()
-                    });
-
-                    // Load config first
-                    let mut config = Config::load();
-
-                    // Apply CLI overrides to config
-                    config.apply_cli_overrides(
-                        Some(project_age),
-                        Some(min_age),
-                        Some(
-                            size::parse_size(&min_size).map_err(|e| {
-                                anyhow::anyhow!("Invalid size format '{}': {}", min_size, e)
-                            })? / (1024 * 1024),
-                        ), // Convert bytes to MB for config
-                    );
-
-                    // Merge CLI exclusions
-                    config.exclusions.patterns.extend(exclude.iter().cloned());
-
-                    // Use config values (after CLI overrides) for scan options
-                    let min_size_bytes = config.thresholds.min_size_mb * 1024 * 1024;
-
-                    let scan_options = ScanOptions {
-                        cache,
-                        app_cache,
-                        temp,
-                        trash,
-                        build,
-                        downloads,
-                        large,
-                        old,
-                        applications,
-                        browser,
-                        system,
-                        empty,
-                        duplicates,
-                        windows_update,
-                        event_logs,
-                        project_age_days: config.thresholds.project_age_days,
-                        min_age_days: config.thresholds.min_age_days,
-                        min_size_bytes,
-                    };
-
-                    let results =
-                        scanner::scan_all(&scan_path, scan_options.clone(), output_mode, &config)?;
-
-                    if json {
-                        output::print_json(&results)?;
-                    } else {
-                        output::print_human_with_options(
-                            &results,
-                            output_mode,
-                            Some(&scan_options),
-                        );
-                    }
-
-                    cleaner::clean_all(&results, yes, output_mode, permanent, dry_run)?;
-
-                    Ok(())
-                }
+                } => commands::clean_command::handle_clean(
+                    all,
+                    cache,
+                    app_cache,
+                    temp,
+                    trash,
+                    build,
+                    downloads,
+                    large,
+                    old,
+                    browser,
+                    system,
+                    empty,
+                    duplicates,
+                    applications,
+                    windows_update,
+                    event_logs,
+                    path,
+                    json,
+                    yes,
+                    project_age,
+                    min_age,
+                    min_size,
+                    exclude,
+                    permanent,
+                    dry_run,
+                    output_mode,
+                ),
                 Commands::Analyze {
                     disk,
                     entire_disk,
@@ -980,568 +619,61 @@ impl Cli {
                     min_age,
                     min_size,
                     exclude,
-                } => {
-                    // Load config first
-                    let config = Config::load();
-
-                    // Determine if we're in disk insights mode or legacy cleanable file mode
-                    let has_category_flags = cache
-                        || app_cache
-                        || temp
-                        || trash
-                        || build
-                        || downloads
-                        || large
-                        || old
-                        || browser
-                        || system
-                        || empty
-                        || duplicates
-                        || applications
-                        || all;
-                    let disk_mode = disk || (!has_category_flags); // Default to disk mode if no category flags
-
-                    if disk_mode {
-                        // Disk insights mode
-                        use crate::disk_usage::{scan_directory, SortBy};
-                        use crate::utils;
-
-                        // Determine scan path
-                        let scan_path = if let Some(custom_path) = path {
-                            // User specified a custom path
-                            custom_path
-                        } else if entire_disk {
-                            // User wants to scan entire disk
-                            utils::get_root_disk_path()
-                        } else {
-                            // Default to user directory
-                            if let Ok(userprofile) = std::env::var("USERPROFILE") {
-                                PathBuf::from(&userprofile)
-                            } else {
-                                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                            }
-                        };
-
-                        if !scan_path.exists() {
-                            return Err(anyhow::anyhow!(
-                                "Path does not exist: {}",
-                                scan_path.display()
-                            ));
-                        }
-
-                        // Parse sort option
-                        let sort_by = match sort.as_deref() {
-                            Some("name") => SortBy::Name,
-                            Some("files") => SortBy::Files,
-                            _ => SortBy::Size,
-                        };
-
-                        // Adjust depth based on scan type and config
-                        // If user specified depth explicitly, use it; otherwise use config defaults
-                        let effective_depth = if depth == 3 {
-                            // User didn't specify depth, use config defaults
-                            if entire_disk {
-                                config.ui.scan_depth_entire_disk
-                            } else {
-                                config.ui.scan_depth_user
-                            }
-                        } else {
-                            // User specified depth explicitly via CLI, use it (overrides config)
-                            depth
-                        };
-
-                        // Scan directory
-                        let spinner = if output_mode != OutputMode::Quiet {
-                            Some(crate::progress::create_spinner(&format!(
-                                "Scanning {} (depth: {})...",
-                                scan_path.display(),
-                                effective_depth
-                            )))
-                        } else {
-                            None
-                        };
-
-                        let insights = scan_directory(&scan_path, effective_depth)?;
-
-                        if let Some(sp) = spinner {
-                            crate::progress::finish_and_clear(&sp);
-                        }
-
-                        if interactive {
-                            // Launch TUI mode
-                            use crate::tui;
-                            let mut app_state = tui::state::AppState::new();
-                            app_state.screen = tui::state::Screen::DiskInsights {
-                                insights: insights.clone(),
-                                current_path: scan_path.clone(),
-                                cursor: 0,
-                                sort_by,
-                            };
-                            tui::run(Some(app_state))?;
-                        } else {
-                            // CLI output mode
-                            output::print_disk_insights(
-                                &insights,
-                                &scan_path,
-                                top.unwrap_or(10),
-                                sort_by,
-                                output_mode,
-                            );
-                        }
-
-                        Ok(())
-                    } else {
-                        // Legacy cleanable file analysis mode
-                        let (
-                            cache,
-                            app_cache,
-                            temp,
-                            trash,
-                            build,
-                            downloads,
-                            large,
-                            old,
-                            applications,
-                            browser,
-                            system,
-                            empty,
-                            duplicates,
-                        ) = if all {
-                            (
-                                true, true, true, true, true, true, true, true, true, true, true,
-                                true, true,
-                            )
-                        } else {
-                            (
-                                cache,
-                                app_cache,
-                                temp,
-                                trash,
-                                build,
-                                downloads,
-                                large,
-                                old,
-                                applications,
-                                browser,
-                                system,
-                                empty,
-                                duplicates,
-                            )
-                        };
-
-                        let scan_path = path.unwrap_or_else(|| {
-                            directories::UserDirs::new()
-                                .expect("Failed to get user directory")
-                                .home_dir()
-                                .to_path_buf()
-                        });
-
-                        // Load config first
-                        let mut config = Config::load();
-
-                        // Apply CLI overrides to config
-                        config.apply_cli_overrides(
-                            Some(project_age),
-                            Some(min_age),
-                            Some(
-                                size::parse_size(&min_size).map_err(|e| {
-                                    anyhow::anyhow!("Invalid size format '{}': {}", min_size, e)
-                                })? / (1024 * 1024),
-                            ), // Convert bytes to MB for config
-                        );
-
-                        // Merge CLI exclusions
-                        config.exclusions.patterns.extend(exclude.iter().cloned());
-
-                        // Use config values (after CLI overrides) for scan options
-                        let min_size_bytes = config.thresholds.min_size_mb * 1024 * 1024;
-
-                        let results = scanner::scan_all(
-                            &scan_path,
-                            ScanOptions {
-                                cache,
-                                app_cache,
-                                temp,
-                                trash,
-                                build,
-                                downloads,
-                                large,
-                                old,
-                                applications,
-                                browser,
-                                system,
-                                empty,
-                                duplicates,
-                                windows_update: false,
-                                event_logs: false,
-                                project_age_days: config.thresholds.project_age_days,
-                                min_age_days: config.thresholds.min_age_days,
-                                min_size_bytes,
-                            },
-                            output_mode,
-                            &config,
-                        )?;
-
-                        // Launch TUI if interactive mode requested
-                        if interactive {
-                            use crate::tui;
-                            let mut app_state = tui::state::AppState::new();
-                            app_state.scan_path = scan_path;
-                            app_state.config = config;
-                            // Store scan results and process them
-                            app_state.scan_results = Some(results);
-                            app_state.flatten_results();
-                            app_state.screen = tui::state::Screen::Results;
-                            tui::run(Some(app_state))?;
-                        } else {
-                            output::print_analyze(&results, output_mode);
-                        }
-
-                        Ok(())
-                    }
-                }
+                } => commands::analyze_command::handle_analyze(
+                    disk,
+                    entire_disk,
+                    interactive,
+                    depth,
+                    top,
+                    sort,
+                    all,
+                    cache,
+                    app_cache,
+                    temp,
+                    trash,
+                    build,
+                    downloads,
+                    large,
+                    old,
+                    browser,
+                    system,
+                    empty,
+                    duplicates,
+                    applications,
+                    path,
+                    project_age,
+                    min_age,
+                    min_size,
+                    exclude,
+                    output_mode,
+                ),
                 Commands::Config { show, reset, edit } => {
-                    if show {
-                        let config = Config::load_or_create();
-                        println!("{}", Theme::header("Current Configuration"));
-                        println!("{}", Theme::divider_bold(60));
-                        println!();
-                        println!("Thresholds:");
-                        println!("  Project age: {} days", config.thresholds.project_age_days);
-                        println!("  Min age: {} days", config.thresholds.min_age_days);
-                        println!("  Min size: {} MB", config.thresholds.min_size_mb);
-                        println!();
-                        println!("Paths:");
-                        if config.paths.scan_roots.is_empty() {
-                            println!("  (none - using default)");
-                        } else {
-                            for path in &config.paths.scan_roots {
-                                println!("  {}", path);
-                            }
-                        }
-                        println!();
-                        println!("Exclusions:");
-                        if config.exclusions.patterns.is_empty() {
-                            println!("  (none)");
-                        } else {
-                            for pattern in &config.exclusions.patterns {
-                                println!("  {}", pattern);
-                            }
-                        }
-                        println!();
-                        println!("UI Settings:");
-                        if let Some(ref path) = config.ui.default_scan_path {
-                            println!("  Default scan path: {}", path);
-                        } else {
-                            println!("  Default scan path: (auto-detect)");
-                        }
-                        println!("  Output mode: {}", config.ui.output_mode);
-                        println!("  Animations: {}", config.ui.animations);
-                        println!("  Refresh rate: {} ms", config.ui.refresh_rate_ms);
-                        println!();
-                        println!("Safety Settings:");
-                        println!("  Always confirm: {}", config.safety.always_confirm);
-                        println!("  Default permanent: {}", config.safety.default_permanent);
-                        println!("  Max no-confirm files: {}", config.safety.max_no_confirm);
-                        println!(
-                            "  Max no-confirm size: {} MB",
-                            config.safety.max_size_no_confirm_mb
-                        );
-                        println!("  Skip locked files: {}", config.safety.skip_locked_files);
-                        println!("  Dry run default: {}", config.safety.dry_run_default);
-                        println!();
-                        println!("Performance Settings:");
-                        println!(
-                            "  Scan threads: {} (0 = auto)",
-                            config.performance.scan_threads
-                        );
-                        println!("  Batch size: {}", config.performance.batch_size);
-                        println!(
-                            "  Parallel scanning: {}",
-                            config.performance.parallel_scanning
-                        );
-                        println!();
-                        println!("History Settings:");
-                        println!("  Enabled: {}", config.history.enabled);
-                        println!(
-                            "  Max entries: {} (0 = unlimited)",
-                            config.history.max_entries
-                        );
-                        println!(
-                            "  Max age: {} days (0 = forever)",
-                            config.history.max_age_days
-                        );
-                        println!();
-                        if let Ok(path) = Config::config_path() {
-                            println!("Config file: {}", path.display());
-                        }
-                    } else if reset {
-                        let default_config = Config::default();
-                        default_config.save()?;
-                        println!("{} Configuration reset to defaults.", Theme::success("OK"));
-                    } else if edit {
-                        if let Ok(path) = Config::config_path() {
-                            // Create default config if it doesn't exist
-                            if !path.exists() {
-                                Config::default().save()?;
-                            }
-                            // Try to open in default editor
-                            let editor =
-                                std::env::var("EDITOR").unwrap_or_else(|_| "notepad".to_string());
-                            std::process::Command::new(editor)
-                                .arg(&path)
-                                .status()
-                                .map_err(|e| anyhow::anyhow!("Failed to open editor: {}", e))?;
-                        } else {
-                            return Err(anyhow::anyhow!("Failed to get config file path"));
-                        }
-                    } else {
-                        // Default: show config
-                        let config = Config::load_or_create();
-                        println!("{}", Theme::header("Current Configuration"));
-                        println!("{}", Theme::divider_bold(60));
-                        println!();
-                        println!("Thresholds:");
-                        println!("  Project age: {} days", config.thresholds.project_age_days);
-                        println!("  Min age: {} days", config.thresholds.min_age_days);
-                        println!("  Min size: {} MB", config.thresholds.min_size_mb);
-                        println!();
-                        println!("Paths:");
-                        if config.paths.scan_roots.is_empty() {
-                            println!("  (none - using default)");
-                        } else {
-                            for path in &config.paths.scan_roots {
-                                println!("  {}", path);
-                            }
-                        }
-                        println!();
-                        println!("Exclusions:");
-                        if config.exclusions.patterns.is_empty() {
-                            println!("  (none)");
-                        } else {
-                            for pattern in &config.exclusions.patterns {
-                                println!("  {}", pattern);
-                            }
-                        }
-                        println!();
-                        println!("UI Settings:");
-                        if let Some(ref path) = config.ui.default_scan_path {
-                            println!("  Default scan path: {}", path);
-                        } else {
-                            println!("  Default scan path: (auto-detect)");
-                        }
-                        println!("  Output mode: {}", config.ui.output_mode);
-                        println!("  Animations: {}", config.ui.animations);
-                        println!("  Refresh rate: {} ms", config.ui.refresh_rate_ms);
-                        println!();
-                        println!("Safety Settings:");
-                        println!("  Always confirm: {}", config.safety.always_confirm);
-                        println!("  Default permanent: {}", config.safety.default_permanent);
-                        println!("  Max no-confirm files: {}", config.safety.max_no_confirm);
-                        println!(
-                            "  Max no-confirm size: {} MB",
-                            config.safety.max_size_no_confirm_mb
-                        );
-                        println!("  Skip locked files: {}", config.safety.skip_locked_files);
-                        println!("  Dry run default: {}", config.safety.dry_run_default);
-                        println!();
-                        println!("Performance Settings:");
-                        println!(
-                            "  Scan threads: {} (0 = auto)",
-                            config.performance.scan_threads
-                        );
-                        println!("  Batch size: {}", config.performance.batch_size);
-                        println!(
-                            "  Parallel scanning: {}",
-                            config.performance.parallel_scanning
-                        );
-                        println!();
-                        println!("History Settings:");
-                        println!("  Enabled: {}", config.history.enabled);
-                        println!(
-                            "  Max entries: {} (0 = unlimited)",
-                            config.history.max_entries
-                        );
-                        println!(
-                            "  Max age: {} days (0 = forever)",
-                            config.history.max_age_days
-                        );
-                        println!();
-                        if let Ok(path) = Config::config_path() {
-                            println!("Config file: {}", path.display());
-                        }
-                    }
-                    Ok(())
+                    commands::config_command::handle_config(show, reset, edit)
                 }
                 Commands::Restore {
                     last,
                     path,
                     from,
                     all,
-                } => {
-                    let output_mode = if self.quiet {
-                        OutputMode::Quiet
-                    } else if self.verbose >= 2 {
-                        OutputMode::VeryVerbose
-                    } else if self.verbose == 1 {
-                        OutputMode::Verbose
-                    } else {
-                        OutputMode::Normal
-                    };
-
-                    if all {
-                        // Restore all contents of Recycle Bin in bulk
-                        match restore::restore_all_bin(output_mode, None) {
-                            Ok(result) => {
-                                if output_mode != OutputMode::Quiet {
-                                    println!();
-                                    println!(
-                                        "{} {}",
-                                        Theme::success("OK"),
-                                        Theme::success(&result.summary())
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                return Err(anyhow::anyhow!("Failed to restore: {}", e));
-                            }
-                        }
-                    } else if last {
-                        // Restore from last deletion session
-                        match restore::restore_last(output_mode) {
-                            Ok(result) => {
-                                if output_mode != OutputMode::Quiet {
-                                    println!();
-                                    println!(
-                                        "{} {}",
-                                        Theme::success("OK"),
-                                        Theme::success(&result.summary())
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                return Err(anyhow::anyhow!("Failed to restore: {}", e));
-                            }
-                        }
-                    } else if let Some(ref restore_path) = path {
-                        // Restore specific path
-                        match restore::restore_path(restore_path, output_mode) {
-                            Ok(result) => {
-                                if output_mode != OutputMode::Quiet {
-                                    println!();
-                                    println!(
-                                        "{} {}",
-                                        Theme::success("OK"),
-                                        Theme::success(&result.summary())
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                return Err(anyhow::anyhow!("Failed to restore: {}", e));
-                            }
-                        }
-                    } else if let Some(ref log_path) = from {
-                        // Restore from specific log file
-                        let log = history::load_log(log_path).with_context(|| {
-                            format!("Failed to load log file: {}", log_path.display())
-                        })?;
-                        match restore::restore_from_log(&log, output_mode) {
-                            Ok(result) => {
-                                if output_mode != OutputMode::Quiet {
-                                    println!();
-                                    println!(
-                                        "{} {}",
-                                        Theme::success("OK"),
-                                        Theme::success(&result.summary())
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                return Err(anyhow::anyhow!("Failed to restore: {}", e));
-                            }
-                        }
-                    } else {
-                        // Default: restore from last session
-                        match restore::restore_last(output_mode) {
-                            Ok(result) => {
-                                if output_mode != OutputMode::Quiet {
-                                    println!();
-                                    println!(
-                                        "{} {}",
-                                        Theme::success("OK"),
-                                        Theme::success(&result.summary())
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                return Err(anyhow::anyhow!("Failed to restore: {}", e));
-                            }
-                        }
-                    }
-
-                    Ok(())
-                }
+                } => commands::restore_command::handle_restore(
+                    last,
+                    path,
+                    from,
+                    all,
+                    self.quiet,
+                    self.verbose,
+                ),
                 Commands::Remove { config, data, yes } => {
-                    let output_mode = if self.quiet {
-                        OutputMode::Quiet
-                    } else if self.verbose >= 2 {
-                        OutputMode::VeryVerbose
-                    } else if self.verbose == 1 {
-                        OutputMode::Verbose
-                    } else {
-                        OutputMode::Normal
-                    };
-
-                    // Confirm unless --yes flag is provided
-                    if !yes {
-                        println!();
-                        println!(
-                            "{}",
-                            Theme::warning("Warning: This will uninstall wole from your system.")
-                        );
-                        println!();
-                        println!("This will:");
-                        println!("  • Remove the wole executable");
-                        println!("  • Remove wole from your PATH");
-                        if config {
-                            println!(
-                                "  • Remove config directory ({})",
-                                uninstall::get_config_dir()
-                                    .map(|p| p.display().to_string())
-                                    .unwrap_or_else(|_| "%APPDATA%\\wole".to_string())
-                            );
-                        }
-                        if data {
-                            println!(
-                                "  • Remove data directory ({})",
-                                uninstall::get_data_dir()
-                                    .map(|p| p.display().to_string())
-                                    .unwrap_or_else(|_| "%LOCALAPPDATA%\\wole".to_string())
-                            );
-                        }
-                        println!();
-                        print!("Are you sure you want to continue? [y/N]: ");
-                        io::stdout().flush().ok();
-                        let input = match read_line_from_stdin() {
-                            Ok(line) => line.trim().to_lowercase(),
-                            Err(_) => {
-                                // If reading fails (e.g., stdin is not available), default to "no"
-                                println!("\nUninstall cancelled (failed to read input).");
-                                return Ok(());
-                            }
-                        };
-                        if input != "y" && input != "yes" {
-                            println!("Uninstall cancelled.");
-                            return Ok(());
-                        }
-                    }
-
-                    uninstall::uninstall(config, data, output_mode)?;
-                    Ok(())
+                    commands::remove_command::handle_remove(
+                        config,
+                        data,
+                        yes,
+                        self.quiet,
+                        self.verbose,
+                    )
                 }
                 Commands::Update { yes, check } => {
-                    crate::update::check_and_update(yes, check, output_mode)?;
-                    Ok(())
+                    commands::update_command::handle_update(yes, check, output_mode)
                 }
                 Commands::Optimize {
                     all,
@@ -1557,69 +689,22 @@ impl Cli {
                     explorer,
                     dry_run,
                     yes,
-                } => {
-                    // If no options specified, default to --all
-                    let all = if !all
-                        && !dns
-                        && !thumbnails
-                        && !icons
-                        && !databases
-                        && !fonts
-                        && !memory
-                        && !network
-                        && !bluetooth
-                        && !search
-                        && !explorer
-                    {
-                        if output_mode != OutputMode::Quiet {
-                            println!();
-                            println!(
-                                "{}",
-                                Theme::primary(
-                                    "No options specified, running all available optimizations..."
-                                )
-                            );
-                            println!();
-                        }
-                        true
-                    } else {
-                        all
-                    };
-
-                    if output_mode != OutputMode::Quiet {
-                        println!();
-                        println!("{}", Theme::header("Windows System Optimization"));
-                        println!("{}", Theme::divider_bold(60));
-
-                        if dry_run {
-                            println!(
-                                "{}",
-                                Theme::warning("DRY RUN MODE - No changes will be made")
-                            );
-                        }
-                        println!();
-                    }
-
-                    let results = optimize::run_optimizations(
-                        all,
-                        dns,
-                        thumbnails,
-                        icons,
-                        databases,
-                        fonts,
-                        memory,
-                        network,
-                        bluetooth,
-                        search,
-                        explorer,
-                        dry_run,
-                        yes,
-                        output_mode,
-                    );
-
-                    optimize::print_summary(&results, output_mode);
-                    Ok(())
-                }
+                } => commands::optimize_command::handle_optimize(
+                    all,
+                    dns,
+                    thumbnails,
+                    icons,
+                    databases,
+                    fonts,
+                    memory,
+                    network,
+                    bluetooth,
+                    search,
+                    explorer,
+                    dry_run,
+                    yes,
+                    output_mode,
+                ),
                 // GPU implementation commented out - not polished yet
                 // Commands::DebugGpu => {
                 //     // Force debug mode
@@ -1657,135 +742,15 @@ impl Cli {
                 //     }
                 //     Ok(())
                 // }
-                Commands::Status { json, watch: _ } => {
-                    if json {
-                        // JSON output mode - use text output
-                        use sysinfo::System;
-
-                        let mut system = System::new();
-                        system.refresh_all();
-
-                        match status::gather_status(&mut system) {
-                            Ok(status) => {
-                                let json_output = serde_json::to_string_pretty(&status)?;
-                                println!("{}", json_output);
-                                Ok(())
-                            }
-                            Err(e) => Err(anyhow::anyhow!("Failed to gather system status: {}", e)),
-                        }
-                    } else {
-                        // Launch interactive TUI for real-time status dashboard
-                        // Ignore watch flag - TUI always auto-refreshes
-                        use crate::status::gather_status;
-                        use sysinfo::System;
-
-                        let mut system = System::new();
-                        system.refresh_all();
-
-                        match gather_status(&mut system) {
-                            Ok(status) => {
-                                let mut app_state = crate::tui::state::AppState::new();
-                                app_state.screen = crate::tui::state::Screen::Status {
-                                    status: Box::new(status),
-                                    last_refresh: std::time::Instant::now(),
-                                };
-                                crate::tui::run(Some(app_state))?;
-                                Ok(())
-                            }
-                            Err(e) => Err(anyhow::anyhow!("Failed to gather system status: {}", e)),
-                        }
-                    }
+                Commands::Status { json, watch } => {
+                    commands::status_command::handle_status(json, watch)
                 }
                 Commands::Startup {
-                    list: _,
+                    list,
                     disable,
                     enable,
                     json,
-                } => {
-                    use crate::categories::startup;
-
-                    if let Some(name) = disable {
-                        let programs = startup::list_startup_programs()?;
-                        if let Some(program) = programs.iter().find(|p| p.name == name) {
-                            startup::disable_startup_program(program)?;
-                            if !json {
-                                println!(
-                                    "{} Disabled startup program: {}",
-                                    Theme::success("✓"),
-                                    Theme::value(&name)
-                                );
-                            }
-                        } else {
-                            return Err(anyhow::anyhow!("Startup program not found: {}", name));
-                        }
-                    } else if let Some(name) = enable {
-                        let programs = startup::list_startup_programs()?;
-                        if let Some(program) = programs.iter().find(|p| p.name == name) {
-                            startup::enable_startup_program(program)?;
-                            if !json {
-                                println!(
-                                    "{} Enabled startup program: {}",
-                                    Theme::success("✓"),
-                                    Theme::value(&name)
-                                );
-                            }
-                        } else {
-                            return Err(anyhow::anyhow!("Startup program not found: {}", name));
-                        }
-                    } else {
-                        // List all startup programs
-                        let programs = startup::list_startup_programs()?;
-
-                        if json {
-                            println!("{}", serde_json::to_string_pretty(&programs)?);
-                        } else {
-                            println!();
-                            println!("{}", Theme::header("Windows Startup Programs"));
-                            println!("{}", Theme::divider_bold(60));
-                            println!();
-
-                            if programs.is_empty() {
-                                println!("{}", Theme::muted("No startup programs found."));
-                            } else {
-                                println!(
-                                    "{:<30} {:<50} {:<15} {:<10}",
-                                    Theme::primary("Name"),
-                                    Theme::primary("Command"),
-                                    Theme::primary("Location"),
-                                    Theme::primary("Impact")
-                                );
-                                println!("{}", Theme::divider(60));
-
-                                for program in &programs {
-                                    let impact_str = program.impact.as_str();
-                                    let location_short = if program.location.len() > 45 {
-                                        format!("{}...", &program.location[..42])
-                                    } else {
-                                        program.location.clone()
-                                    };
-                                    println!(
-                                        "{:<30} {:<50} {:<15} {:<10}",
-                                        Theme::value(&program.name),
-                                        Theme::muted(&program.command),
-                                        Theme::muted(&location_short),
-                                        Theme::category(impact_str)
-                                    );
-                                }
-
-                                println!();
-                                println!(
-                                    "{} Use {} to disable or {} to enable a program",
-                                    Theme::muted("→"),
-                                    Theme::command("wole startup --disable <name>"),
-                                    Theme::command("wole startup --enable <name>")
-                                );
-                            }
-                            println!();
-                        }
-                    }
-
-                    Ok(())
-                }
+                } => commands::startup_command::handle_startup(list, disable, enable, json),
             },
         }
     }

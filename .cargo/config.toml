@@ -1,1 +1,9 @@
-# Empty - stack size is configured in build.rs instead
+# Use GNU toolchain instead of MSVC (doesn't require Visual Studio Build Tools)
+[build]
+target = "x86_64-pc-windows-gnu"
+
+# Configure linker for GNU toolchain
+[target.x86_64-pc-windows-gnu]
+linker = "gcc"
+
+# Stack size is configured in build.rs instead
