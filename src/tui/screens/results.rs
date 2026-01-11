@@ -360,7 +360,7 @@ fn render_search_bar(f: &mut Frame, area: Rect, app_state: &AppState) {
     let search_text = if app_state.search_mode {
         format!("/ {}_", app_state.search_query) // Cursor indicator
     } else if app_state.search_query.is_empty() {
-        "Press / to filter results... Use /type:code, /type:.jpg, etc.".to_string()
+        "Press / to filter results... Use /type:image, /type:.jpg, etc.".to_string()
     } else {
         let mut filter_text = String::new();
         let has_extension_filter = extension_filter.is_some();

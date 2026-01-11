@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `src/`: Rust library and CLI implementation. Key areas include `src/cli.rs` (CLI orchestration), `src/cli/commands/` (per-command handlers), `src/cli/interactive_menu.rs` (interactive menu), `src/cleaner.rs` (deletion logic), `src/categories/` (scan/clean per category), and `src/tui/` (terminal UI).
+- `src/`: Rust library and CLI implementation. Key areas include `src/cli.rs` (CLI orchestration), `src/cli/commands/` (per-command handlers), `src/cli/interactive_menu.rs` (interactive menu), `src/cleaner.rs` (cleaning orchestration), `src/cleaner/` (deletion features), `src/optimize.rs` (optimization orchestration), `src/optimize/` (optimization features), `src/categories/` (scan/clean per category), and `src/tui/` (terminal UI).
 - `tests/`: Integration tests.
 - `Cargo.toml`: Dependencies, features, and build settings.
 - `build/`, `artifacts/`, `target/`: Build outputs and generated artifacts (do not edit by hand).
