@@ -7,7 +7,45 @@ use crate::config::Config;
 use crate::output::{self, OutputMode};
 use crate::scanner;
 use crate::size;
-use std::path::PathBuf;
+use crate::theme::Theme;
+use crate::utils;
+use std::path::{Path, PathBuf};
+
+// Helper function to format numbers (copied from output.rs for local use)
+fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
+}
+
+fn get_disk_space_for_path(path: &Path) -> Option<(u64, u64)> {
+    use sysinfo::Disks;
+
+    let mut disks = Disks::new_with_refreshed_list();
+    disks.refresh();
+
+    // Choose disk with the longest mount-point prefix match.
+    let mut best: Option<(usize, u64, u64)> = None; // (match_len, total, avail)
+    for disk in disks.list() {
+        let mount = disk.mount_point();
+        if path.starts_with(mount) {
+            let len = mount.as_os_str().len();
+            let total = disk.total_space();
+            let avail = disk.available_space();
+            if best.map(|b| len > b.0).unwrap_or(true) {
+                best = Some((len, total, avail));
+            }
+        }
+    }
+
+    best.map(|(_, total, avail)| (total, avail))
+}
 
 pub(crate) fn handle_scan(
     all: bool,
@@ -95,7 +133,7 @@ pub(crate) fn handle_scan(
     // Default to current directory to avoid stack overflow from OneDrive/UserDirs
     // PERFORMANCE FIX: Avoid OneDrive paths which are very slow to scan on Windows
     // Use current directory instead, which is faster and more predictable
-    let scan_path = path.unwrap_or_else(|| {
+    let mut scan_path = path.unwrap_or_else(|| {
         // Use current directory as default - faster and avoids OneDrive sync issues
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     });
@@ -142,7 +180,8 @@ pub(crate) fn handle_scan(
             };
             
             if categories.is_empty() {
-                scan_cache.invalidate(None)?;
+                // Full reset: clear cache + scan history so first-scan detection triggers again.
+                scan_cache.clear_all()?;
             } else {
                 scan_cache.invalidate(Some(&categories))?;
             }
@@ -192,6 +231,38 @@ pub(crate) fn handle_scan(
         None
     };
 
+    let mut first_scan_full_disk = false;
+    if let Some(cache) = scan_cache.as_ref() {
+        match cache.get_previous_scan_id() {
+            Ok(None) => {
+                first_scan_full_disk = true;
+            }
+            Ok(Some(_)) => {}
+            Err(e) => {
+                if output_mode != OutputMode::Quiet {
+                    eprintln!(
+                        "Warning: Failed to read scan cache state: {}. Continuing without full disk baseline.",
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    if first_scan_full_disk {
+        scan_path = utils::get_root_disk_path();
+        if output_mode != OutputMode::Quiet {
+            if json {
+                eprintln!("First scan detected: scanning all categories from root to build baseline.");
+            } else {
+                println!();
+                println!("{}", Theme::warning("First scan detected: scanning all enabled categories from root to build baseline."));
+                println!("{}", Theme::muted("This may take longer than usual. Future scans will be faster using incremental cache."));
+                println!();
+            }
+        }
+    }
+
     let results = scanner::scan_all(
         &scan_path,
         scan_options.clone(),
@@ -204,6 +275,44 @@ pub(crate) fn handle_scan(
         output::print_json(&results)?;
     } else {
         output::print_human_with_options(&results, output_mode, Some(&scan_options));
+    }
+
+    // After first scan, show cache statistics
+    if first_scan_full_disk && output_mode != OutputMode::Quiet {
+        if let Some(cache) = scan_cache.as_ref() {
+            if let Ok((total_files, total_storage)) = cache.get_cache_stats() {
+                println!();
+                println!("{}", Theme::header("First Scan Complete - Cache Baseline Built"));
+                println!("{}", Theme::divider(60));
+                println!();
+                println!(
+                    "  {} Total files indexed: {}",
+                    Theme::muted("→"),
+                    Theme::primary(&format_number(total_files as u64))
+                );
+                println!(
+                    "  {} Total file bytes indexed: {}",
+                    Theme::muted("→"),
+                    Theme::primary(&bytesize::to_string(total_storage, true))
+                );
+
+                if let Some((total, avail)) = get_disk_space_for_path(&scan_path) {
+                    let used = total.saturating_sub(avail);
+                    let total_gb = total as f64 / 1_000_000_000.0;
+                    println!(
+                        "  {} Disk (OS): {} used / {} total ({} free, ~{:.0} GB total)",
+                        Theme::muted("→"),
+                        Theme::primary(&bytesize::to_string(used, true)),
+                        Theme::primary(&bytesize::to_string(total, true)),
+                        Theme::primary(&bytesize::to_string(avail, true)),
+                        total_gb
+                    );
+                }
+                println!();
+                println!("{}", Theme::muted("Future scans will use incremental cache for faster results."));
+                println!();
+            }
+        }
     }
 
     Ok(())

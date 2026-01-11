@@ -592,6 +592,19 @@ impl ScanCache {
         Ok(())
     }
 
+    /// Completely clear scan cache *and* scan history.
+    ///
+    /// This resets first-scan detection (get_previous_scan_id() becomes None)
+    /// so the next scan will behave like a true first scan again.
+    pub fn clear_all(&mut self) -> Result<()> {
+        // File signatures
+        self.db.execute("DELETE FROM file_records", [])?;
+        // Scan history (used by get_previous_scan_id)
+        self.db.execute("DELETE FROM scan_sessions", [])?;
+        self.current_scan_id = None;
+        Ok(())
+    }
+
     /// Get the previous scan ID (for getting cached results)
     pub fn get_previous_scan_id(&self) -> Result<Option<i64>> {
         let result: Option<i64> = self.db.query_row(
@@ -647,6 +660,23 @@ impl ScanCache {
     /// Get current scan ID
     pub fn current_scan_id(&self) -> Option<i64> {
         self.current_scan_id
+    }
+
+    /// Get cache statistics: total files and total storage scanned
+    pub fn get_cache_stats(&self) -> Result<(usize, u64)> {
+        let total_files: i64 = self.db.query_row(
+            "SELECT COUNT(*) FROM file_records",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let total_storage: i64 = self.db.query_row(
+            "SELECT COALESCE(SUM(size), 0) FROM file_records",
+            [],
+            |row| row.get(0),
+        )?;
+
+        Ok((total_files as usize, total_storage as u64))
     }
 }
 

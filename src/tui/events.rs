@@ -370,10 +370,12 @@ fn handle_dashboard_event(
                         progress: crate::tui::state::ScanProgress {
                             current_category: String::new(),
                             current_path: None,
+                            notice: None,
                             category_progress,
                             total_scanned: 0,
                             total_found: 0,
                             total_size: 0,
+                            start_time: std::time::Instant::now(),
                         },
                     };
                 }
@@ -395,10 +397,12 @@ fn handle_dashboard_event(
                         progress: crate::tui::state::ScanProgress {
                             current_category: String::new(),
                             current_path: None,
+                            notice: None,
                             category_progress,
                             total_scanned: 0,
                             total_found: 0,
                             total_size: 0,
+                            start_time: std::time::Instant::now(),
                         },
                     };
                 }
@@ -418,6 +422,7 @@ fn handle_dashboard_event(
                         progress: crate::tui::state::ScanProgress {
                             current_category: "Disk Insights".to_string(),
                             current_path: Some(scan_path),
+                            notice: None,
                             category_progress: vec![crate::tui::state::CategoryProgress {
                                 name: "Analyzing disk usage".to_string(),
                                 completed: false,
@@ -427,6 +432,7 @@ fn handle_dashboard_event(
                             total_scanned: 0,
                             total_found: 0,
                             total_size: 0,
+                            start_time: std::time::Instant::now(),
                         },
                     };
                 }

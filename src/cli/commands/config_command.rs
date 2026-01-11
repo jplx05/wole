@@ -80,7 +80,7 @@ pub(crate) fn handle_config(show: bool, reset: bool, edit: bool, clear_cache: bo
     } else if clear_cache {
         match crate::scan_cache::ScanCache::open() {
             Ok(mut cache) => {
-                cache.invalidate(None)?;
+                cache.clear_all()?;
                 println!("{} Scan cache cleared successfully.", Theme::success("OK"));
             }
             Err(e) => {

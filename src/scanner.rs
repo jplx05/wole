@@ -238,6 +238,7 @@ pub fn scan_all(
     let mut scan_id: Option<i64> = None;
     let mut cache_enabled = scan_cache.is_some() && config.cache.enabled;
     let mut use_incremental = false;
+    let mut is_first_scan = false;
 
     if let Some(cache) = scan_cache.as_mut() {
         if cache_enabled {
@@ -257,6 +258,7 @@ pub fn scan_all(
             };
 
             if cache_enabled {
+                is_first_scan = previous_scan_id.is_none();
                 use_incremental = previous_scan_id.is_some();
                 let scan_type = if use_incremental { "incremental" } else { "full" };
                 match cache.start_scan(scan_type, &categories) {
@@ -270,6 +272,17 @@ pub fn scan_all(
                         }
                         use_incremental = false;
                     }
+                }
+            }
+        }
+    }
+    
+    // On first scan, perform full disk traversal to build baseline (CLI mode)
+    if is_first_scan && mode != OutputMode::Quiet {
+        if let Some(cache) = scan_cache.as_mut() {
+            if let Some(id) = scan_id {
+                if let Err(e) = perform_full_disk_traversal_cli_grouped(path, config, cache, id) {
+                    eprintln!("Warning: Full disk traversal failed: {}. Continuing with category scans.", e);
                 }
             }
         }
@@ -421,6 +434,290 @@ pub fn scan_all(
     Ok(results)
 }
 
+/// Perform full disk traversal for first scan (CLI version with single-line updates)
+fn perform_full_disk_traversal_cli_grouped(
+    root_path: &Path,
+    config: &Config,
+    scan_cache: &mut ScanCache,
+    scan_id: i64,
+) -> Result<()> {
+    use walkdir::WalkDir;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
+    use std::path::PathBuf;
+    use std::collections::HashMap;
+    use std::io::{self, Write};
+    
+    let files_processed = AtomicU64::new(0);
+    let cache_updates: Mutex<Vec<(crate::scan_cache::FileSignature, String)>> = Mutex::new(Vec::new());
+    const BATCH_SIZE: usize = 1000; // Batch cache updates for efficiency
+    
+    // Track parent folders (top-level milestones) and their stats
+    let mut parent_folders: HashMap<PathBuf, (usize, u64)> = HashMap::new(); // (file_count, total_size)
+    let mut current_parent: Option<PathBuf> = None;
+    let mut spinner_frame = 0u8;
+    let mut last_update = std::time::Instant::now();
+    const UPDATE_INTERVAL_MS: u64 = 100; // Update display every 100ms
+    
+    // Determine what constitutes a "parent folder" - use depth 1 or 2 from root
+    const PARENT_DEPTH_THRESHOLD: usize = 2;
+    
+    // Helper to print/update a single line (overwrites previous line)
+    let print_line = |message: &str| {
+        print!("\r{}", message);
+        // Clear to end of line to avoid leftover characters
+        print!("\x1b[K");
+        io::stdout().flush().ok();
+    };
+    
+    // Helper to get spinner character
+    let get_spinner = |frame: u8| -> char {
+        match frame % 4 {
+            0 => '⠋',
+            1 => '⠙',
+            2 => '⠹',
+            3 => '⠸',
+            _ => '⠋',
+        }
+    };
+    
+    // Use walkdir (sequential) for CLI to avoid thread safety issues
+    for entry in WalkDir::new(root_path)
+        .max_depth(20) // Reasonable depth limit
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            let entry_path = e.path();
+            
+            // Skip system paths
+            if crate::utils::is_system_path(entry_path) {
+                return false;
+            }
+            
+            // Skip symlinks and reparse points
+            if e.file_type().is_symlink() || crate::utils::is_windows_reparse_point(entry_path) {
+                return false;
+            }
+            
+            // Check exclusions
+            if config.is_excluded(entry_path) {
+                return false;
+            }
+            
+            true
+        }) {
+        match entry {
+            Ok(e) => {
+                let entry_path = e.path();
+                let depth = e.depth();
+                
+                if e.file_type().is_dir() {
+                    // Determine if this is a "parent folder" (milestone)
+                    if depth <= PARENT_DEPTH_THRESHOLD {
+                        // When we encounter a new parent folder, print summary of previous parent if it had files
+                        if let Some(ref prev_parent) = current_parent {
+                            if let Some((file_count, total_size)) = parent_folders.get(prev_parent) {
+                                if *file_count > 0 {
+                                    // Move to new line and print summary
+                                    println!();
+                                    let folder_name = prev_parent.file_name()
+                                        .and_then(|n| n.to_str())
+                                        .map(|s| s.to_string())
+                                        .unwrap_or_else(|| prev_parent.display().to_string());
+                                    println!("✓ Scanned {}: {} files, {}", 
+                                        folder_name,
+                                        file_count,
+                                        bytesize::to_string(*total_size, true)
+                                    );
+                                }
+                            }
+                        }
+                        
+                        // Start new parent folder
+                        current_parent = Some(entry_path.to_path_buf());
+                        parent_folders.insert(entry_path.to_path_buf(), (0, 0));
+                        
+                        // Print "Scanning {folder}" on single line
+                        let folder_name = entry_path.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| entry_path.display().to_string());
+                        let spinner = get_spinner(spinner_frame);
+                        print_line(&format!("{} Scanning {}", spinner, folder_name));
+                        spinner_frame = spinner_frame.wrapping_add(1);
+                    }
+                } else if e.file_type().is_file() {
+                    // Add file to current parent folder
+                    if let Some(ref parent) = current_parent {
+                        let (count, size) = parent_folders.entry(parent.clone()).or_insert((0, 0));
+                        
+                        // Get file size
+                        if let Ok(metadata) = std::fs::metadata(entry_path) {
+                            let file_size = metadata.len();
+                            *count += 1;
+                            *size += file_size;
+                            
+                            // Update display with file name (throttled)
+                            if last_update.elapsed().as_millis() >= UPDATE_INTERVAL_MS as u128 {
+                                let file_name = entry_path.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_else(|| entry_path.display().to_string());
+                                let spinner = get_spinner(spinner_frame);
+                                print_line(&format!("{} Reading {}", spinner, file_name));
+                                spinner_frame = spinner_frame.wrapping_add(1);
+                                last_update = std::time::Instant::now();
+                            }
+                        }
+                    }
+                    
+                    // Create file signature (no hash for first scan - too slow)
+                    if let Ok(sig) = crate::scan_cache::FileSignature::from_path(entry_path, false) {
+                        // Use "baseline" as category for first scan files
+                        let mut updates = cache_updates.lock().unwrap();
+                        updates.push((sig, "baseline".to_string()));
+                        
+                        // Batch update cache periodically
+                        if updates.len() >= BATCH_SIZE {
+                            let batch = updates.drain(..).collect::<Vec<_>>();
+                            if let Err(e) = scan_cache.upsert_files_batch(&batch, scan_id) {
+                                eprintln!("\nWarning: Failed to update cache batch: {}", e);
+                            }
+                        }
+                        
+                        files_processed.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+            Err(_) => {
+                // Skip errors during traversal
+            }
+        }
+    }
+    
+    // Print final parent folder summary
+    if let Some(ref parent) = current_parent {
+        if let Some((file_count, total_size)) = parent_folders.get(parent) {
+            if *file_count > 0 {
+                // Move to new line and print summary
+                println!();
+                let folder_name = parent.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| parent.display().to_string());
+                println!("✓ Scanned {}: {} files, {}", 
+                    folder_name,
+                    file_count,
+                    bytesize::to_string(*total_size, true)
+                );
+            }
+        }
+    }
+    
+    // Clear the progress line
+    print_line("");
+    println!();
+    
+    // Flush remaining cache updates
+    let remaining = cache_updates.into_inner().unwrap();
+    if !remaining.is_empty() {
+        scan_cache.upsert_files_batch(&remaining, scan_id)?;
+    }
+    
+    Ok(())
+}
+
+/// Perform full disk traversal for first scan (TUI version with progress events)
+fn perform_full_disk_traversal(
+    root_path: &Path,
+    config: &Config,
+    tx: &Sender<ScanProgressEvent>,
+    scan_cache: &mut ScanCache,
+    scan_id: i64,
+) -> Result<()> {
+    use walkdir::WalkDir;
+    use std::time::{Duration, Instant};
+    
+    let mut cache_updates: Vec<(crate::scan_cache::FileSignature, String)> = Vec::new();
+    const BATCH_SIZE: usize = 1000; // Batch cache updates for efficiency
+    const EVENT_INTERVAL: Duration = Duration::from_millis(50); // Throttle UI events (huge win on large scans)
+    let mut last_event = Instant::now();
+    
+    // Use walkdir (sequential) for TUI to avoid lifetime issues
+    for entry in WalkDir::new(root_path)
+        .max_depth(20) // Reasonable depth limit
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            let entry_path = e.path();
+            
+            // Skip system paths
+            if crate::utils::is_system_path(entry_path) {
+                return false;
+            }
+            
+            // Skip symlinks and reparse points
+            if e.file_type().is_symlink() || crate::utils::is_windows_reparse_point(entry_path) {
+                return false;
+            }
+            
+            // Check exclusions
+            if config.is_excluded(entry_path) {
+                return false;
+            }
+            
+            true
+        }) {
+        match entry {
+            Ok(e) => {
+                let entry_path = e.path();
+                
+                if e.file_type().is_dir() {
+                    // Emit folder reading event (throttled)
+                    if last_event.elapsed() >= EVENT_INTERVAL {
+                        let _ = tx.send(ScanProgressEvent::ReadingFolder {
+                            path: entry_path.to_path_buf(),
+                        });
+                        last_event = Instant::now();
+                    }
+                } else if e.file_type().is_file() {
+                    // Emit file reading event (throttled)
+                    if last_event.elapsed() >= EVENT_INTERVAL {
+                        let _ = tx.send(ScanProgressEvent::ReadingFile {
+                            path: entry_path.to_path_buf(),
+                        });
+                        last_event = Instant::now();
+                    }
+                    
+                    // Create file signature (no hash for first scan - too slow)
+                    if let Ok(sig) = crate::scan_cache::FileSignature::from_path(entry_path, false) {
+                        // Use "baseline" as category for first scan files
+                        cache_updates.push((sig, "baseline".to_string()));
+                        
+                        // Batch update cache periodically
+                        if cache_updates.len() >= BATCH_SIZE {
+                            let batch = cache_updates.drain(..).collect::<Vec<_>>();
+                            if let Err(e) = scan_cache.upsert_files_batch(&batch, scan_id) {
+                                eprintln!("Warning: Failed to update cache batch: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                // Skip errors during traversal
+            }
+        }
+    }
+    
+    // Flush remaining cache updates
+    if !cache_updates.is_empty() {
+        scan_cache.upsert_files_batch(&cache_updates, scan_id)?;
+    }
+    
+    Ok(())
+}
+
 /// Scan all requested categories and emit progress events for TUI.
 pub fn scan_all_with_progress(
     path: &Path,
@@ -551,6 +848,43 @@ pub fn scan_all_with_progress(
 
     if enabled.is_empty() {
         return Ok(results);
+    }
+
+    // Check if this is a first scan and perform full disk traversal BEFORE category scans
+    let is_first_scan = if let Some(cache) = scan_cache.as_ref() {
+        matches!(cache.get_previous_scan_id(), Ok(None))
+    } else {
+        false
+    };
+    
+    // Start scan session if cache is enabled
+    let mut scan_id: Option<i64> = None;
+    let mut cache_enabled = scan_cache.is_some() && config.cache.enabled;
+    
+    if let Some(cache) = scan_cache.as_mut() {
+        if cache_enabled {
+            let categories: Vec<&str> = enabled.iter().map(|job| job.key).collect();
+            let scan_type = if is_first_scan { "full" } else { "incremental" };
+            match cache.start_scan(scan_type, &categories) {
+                Ok(id) => scan_id = Some(id),
+                Err(e) => {
+                    eprintln!("Warning: Failed to start scan cache session: {}. Continuing without cache.", e);
+                    cache_enabled = false;
+                }
+            }
+        }
+    }
+    
+    // On first scan, perform full disk traversal to build baseline BEFORE category scans
+    if is_first_scan {
+        if let Some(cache) = scan_cache.as_mut() {
+            if let Some(id) = scan_id {
+                // Perform full disk traversal with progress reporting
+                if let Err(e) = perform_full_disk_traversal(path, config, tx, cache, id) {
+                    eprintln!("Warning: Full disk traversal failed: {}. Continuing with category scans.", e);
+                }
+            }
+        }
     }
 
     let path_owned = path.to_path_buf();

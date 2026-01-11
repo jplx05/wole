@@ -149,10 +149,12 @@ pub struct RestoreResult {
 pub struct ScanProgress {
     pub current_category: String,
     pub current_path: Option<PathBuf>,
+    pub notice: Option<String>,
     pub category_progress: Vec<CategoryProgress>,
     pub total_scanned: usize,
     pub total_found: usize,
     pub total_size: u64,
+    pub start_time: std::time::Instant,
 }
 
 /// Progress for a single category during scan
@@ -460,6 +462,7 @@ pub struct AppState {
     pub search_query: String,                     // current search query
     pub dashboard_message: Option<String>,        // temporary message for dashboard (e.g. warnings)
     pub last_scan_categories: Option<std::collections::HashSet<String>>, // categories enabled during last scan (for result reuse)
+    pub first_scan_stats: Option<(usize, u64)>,  // (total_files, total_storage) for first scan summary
 }
 
 /// A single result item for display in the table
@@ -572,6 +575,7 @@ impl AppState {
             search_query: String::new(),
             dashboard_message: None,
             last_scan_categories: None, // No previous scan initially
+            first_scan_stats: None,     // No first scan stats initially
         }
     }
 

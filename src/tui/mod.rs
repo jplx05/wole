@@ -26,6 +26,7 @@ use crate::cleaner;
 use crate::cli::ScanOptions;
 use crate::config::Config;
 use crate::restore;
+use crate::scan_cache::ScanCache;
 use crate::scan_events::ScanProgressEvent;
 use crate::scanner;
 
@@ -656,6 +657,22 @@ fn perform_scan_with_progress(
         min_size_bytes,
     };
 
+    let mut first_scan_full_disk = false;
+    if config.cache.enabled {
+        if let Ok(cache) = ScanCache::open() {
+            first_scan_full_disk = matches!(cache.get_previous_scan_id(), Ok(None));
+        }
+    }
+
+    if first_scan_full_disk {
+        let root_path = crate::utils::get_root_disk_path();
+        app_state.scan_path = root_path.clone();
+        if let crate::tui::state::Screen::Scanning { ref mut progress } = app_state.screen {
+            progress.notice = Some("First scan: scanning all categories from root to build baseline (this may take longer)".to_string());
+            progress.current_path = Some(root_path);
+        }
+    }
+
     // Update progress incrementally before scan (simulated progress)
     // Simulate progress by updating each category incrementally
     for (idx, cat_name) in enabled_categories.iter().enumerate() {
@@ -709,12 +726,23 @@ fn perform_scan_with_progress(
     let scan_path = app_state.scan_path.clone();
     let scan_options = options.clone();
     let scan_config = config.clone();
+    let use_cache = scan_config.cache.enabled;
 
     let (result_tx, result_rx) = std::sync::mpsc::channel();
     let (progress_tx, progress_rx) = std::sync::mpsc::channel();
     let _scan_handle = std::thread::spawn(move || {
-        let result =
-            scanner::scan_all_with_progress(&scan_path, scan_options, &scan_config, &progress_tx, None);
+        let mut scan_cache = if use_cache {
+            ScanCache::open().ok()
+        } else {
+            None
+        };
+        let result = scanner::scan_all_with_progress(
+            &scan_path,
+            scan_options,
+            &scan_config,
+            &progress_tx,
+            scan_cache.as_mut(),
+        );
         let _ = result_tx.send(result);
     });
 
@@ -729,6 +757,16 @@ fn perform_scan_with_progress(
     let mut apply_progress_event = |event: ScanProgressEvent, app_state: &mut AppState| {
         if let crate::tui::state::Screen::Scanning { ref mut progress } = app_state.screen {
             match event {
+                ScanProgressEvent::ReadingFolder { path } => {
+                    // First scan: show folder being read
+                    progress.current_category = "Building baseline".to_string();
+                    progress.current_path = Some(path);
+                }
+                ScanProgressEvent::ReadingFile { path } => {
+                    // First scan: show file being read
+                    progress.current_category = "Building baseline".to_string();
+                    progress.current_path = Some(path);
+                }
                 ScanProgressEvent::CategoryStarted {
                     category,
                     current_path,
@@ -919,6 +957,15 @@ fn perform_scan_with_progress(
             .map(|cat| cat.name.clone())
             .collect(),
     );
+
+    // If this was a first scan, get cache stats for summary
+    if first_scan_full_disk {
+        if let Ok(cache) = ScanCache::open() {
+            if let Ok(stats) = cache.get_cache_stats() {
+                app_state.first_scan_stats = Some(stats);
+            }
+        }
+    }
 
     Ok(())
 }

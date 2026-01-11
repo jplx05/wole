@@ -29,6 +29,16 @@ pub enum ScanProgressEvent {
         items: usize,
         size_bytes: u64,
     },
+
+    /// Full disk traversal: reading a folder (first scan only)
+    ReadingFolder {
+        path: PathBuf,
+    },
+
+    /// Full disk traversal: reading a file (first scan only)
+    ReadingFile {
+        path: PathBuf,
+    },
 }
 
 /// Throttled emitter for current-path updates during scanning.

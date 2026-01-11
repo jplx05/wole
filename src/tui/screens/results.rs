@@ -18,6 +18,19 @@ use ratatui::{
 };
 use std::time::SystemTime;
 
+// Helper function to format numbers with commas
+fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
+}
+
 fn truncate_end(s: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
@@ -292,11 +305,13 @@ pub fn render(f: &mut Frame, app_state: &mut AppState) {
     let area = f.area();
 
     // Layout: logo+tagline, summary, search bar (always visible), grouped results, shortcuts
+    // Adjust summary height if first scan stats are shown
+    let summary_height = if app_state.first_scan_stats.is_some() { 8 } else { 5 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(LOGO_WITH_TAGLINE_HEIGHT), // Logo + 2 blank lines + tagline
-            Constraint::Length(5),                        // Summary
+            Constraint::Length(summary_height),           // Summary (taller if first scan stats shown)
             Constraint::Length(3),                        // Search bar (always visible)
             Constraint::Min(10),                          // Grouped results
             Constraint::Length(3),                        // Shortcuts
@@ -370,6 +385,26 @@ pub fn render(f: &mut Frame, app_state: &mut AppState) {
     }
 
     summary_lines.push(Line::from(line2_spans));
+    
+    // Show first scan summary if available
+    if let Some((total_files, total_storage)) = app_state.first_scan_stats {
+        summary_lines.push(Line::from(""));
+        summary_lines.push(Line::from(vec![
+            Span::styled("  ", Styles::secondary()),
+            Span::styled("First scan complete: ", Styles::header()),
+            Span::styled(format!("{} files examined", format_number(total_files as u64)), Styles::primary()),
+            Span::styled(" │ ", Styles::secondary()),
+            Span::styled(
+                format!("{} indexed", bytesize::to_string(total_storage, true)),
+                Styles::primary(),
+            ),
+        ]));
+        summary_lines.push(Line::from(vec![
+            Span::styled("  ", Styles::secondary()),
+            Span::styled("Cache baseline built - future scans will be faster", Styles::muted()),
+        ]));
+    }
+    
     summary_lines.push(Line::from(""));
     summary_lines.push(Line::from(vec![
         Span::styled("  Press ", Styles::secondary()),
