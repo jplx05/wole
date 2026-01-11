@@ -130,7 +130,7 @@ pub fn clean(path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    trash::delete(path)
+    crate::trash_ops::delete(path)
         .with_context(|| format!("Failed to delete event log: {}", path.display()))?;
     Ok(())
 }

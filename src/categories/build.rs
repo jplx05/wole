@@ -263,7 +263,7 @@ fn find_build_artifacts(project_path: &Path, artifacts_to_scan: &[String]) -> Ve
 
 /// Clean (delete) a build artifact directory by moving it to the Recycle Bin
 pub fn clean(path: &Path) -> Result<()> {
-    trash::delete(path)
+    crate::trash_ops::delete(path)
         .with_context(|| format!("Failed to delete build artifact: {}", path.display()))?;
     Ok(())
 }

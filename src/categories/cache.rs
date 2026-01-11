@@ -247,7 +247,7 @@ pub fn clean(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
-    trash::delete(path).with_context(|| {
+    crate::trash_ops::delete(path).with_context(|| {
         format!(
             "Failed to delete package cache directory: {}",
             path.display()

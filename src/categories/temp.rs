@@ -187,7 +187,7 @@ fn scan_temp_dir(
 
 /// Clean (delete) a temp file by moving it to the Recycle Bin
 pub fn clean(path: &Path) -> Result<()> {
-    trash::delete(path)
+    crate::trash_ops::delete(path)
         .with_context(|| format!("Failed to delete temp file: {}", path.display()))?;
     Ok(())
 }

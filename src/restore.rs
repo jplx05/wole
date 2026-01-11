@@ -4,12 +4,12 @@
 
 use crate::history::{list_logs, load_log, DeletionLog, DeletionRecord};
 use crate::theme::Theme;
+use crate::trash_ops;
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use trash::os_limited;
 
 /// Callback function type for progress updates during restoration
 pub type RestoreProgressCallback =
@@ -118,7 +118,7 @@ pub fn restore_from_log_with_progress(
     let mut result = RestoreResult::default();
 
     // Get current Recycle Bin contents
-    let recycle_bin_items = os_limited::list().context("Failed to list Recycle Bin contents")?;
+    let recycle_bin_items = trash_ops::list().context("Failed to list Recycle Bin contents")?;
 
     // Count total items to restore
     let total_to_restore = log
@@ -286,7 +286,7 @@ pub fn restore_from_log_with_progress(
         }
 
         // Try bulk restore
-        match os_limited::restore_all(batch_items.iter().cloned()) {
+        match trash_ops::restore_all(batch_items.iter().cloned()) {
             Ok(()) => {
                 // Bulk restore succeeded - mark all records as restored
                 // Track by record path to avoid double-counting directories
@@ -405,7 +405,7 @@ pub fn restore_path(path: &Path, output_mode: crate::output::OutputMode) -> Resu
     let mut result = RestoreResult::default();
 
     // Get current Recycle Bin contents
-    let recycle_bin_items = os_limited::list().context("Failed to list Recycle Bin contents")?;
+    let recycle_bin_items = trash_ops::list().context("Failed to list Recycle Bin contents")?;
 
     let normalized_path = normalize_path_for_comparison(&path.display().to_string());
     let normalized_path_with_sep = if normalized_path.ends_with('/') {
@@ -526,7 +526,7 @@ pub fn restore_all_bin(
     let mut result = RestoreResult::default();
 
     // Get current Recycle Bin contents
-    let recycle_bin_items = os_limited::list().context("Failed to list Recycle Bin contents")?;
+    let recycle_bin_items = trash_ops::list().context("Failed to list Recycle Bin contents")?;
 
     if recycle_bin_items.is_empty() {
         if output_mode != crate::output::OutputMode::Quiet {
@@ -606,7 +606,7 @@ pub fn restore_all_bin(
         }
 
         // Try bulk restore
-        match os_limited::restore_all(batch.iter().cloned()) {
+        match trash_ops::restore_all(batch.iter().cloned()) {
             Ok(()) => {
                 // Bulk restore succeeded
                 for item in batch {
@@ -751,7 +751,7 @@ pub fn restore_file(item: &trash::TrashItem) -> Result<()> {
 
     // Move file back from Recycle Bin to original location
     // Capture the actual error from the trash crate to provide better diagnostics
-    match trash::os_limited::restore_all(std::iter::once(item.clone())) {
+    match trash_ops::restore_all(std::iter::once(item.clone())) {
         Ok(()) => Ok(()),
         Err(e) => {
             // Provide more detailed error information

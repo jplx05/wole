@@ -143,7 +143,7 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
             // Initialize restore progress
             let result = if *restore_all_bin {
                 // For restore all bin, get count from Recycle Bin
-                trash::os_limited::list()
+                crate::trash_ops::list()
                     .map(|items| items.len())
                     .map_err(|e| anyhow::anyhow!("Failed to list Recycle Bin: {}", e))
             } else {
@@ -1743,7 +1743,7 @@ fn perform_restore(
 
     // Get current Recycle Bin contents
     let recycle_bin_items =
-        trash::os_limited::list().context("Failed to list Recycle Bin contents")?;
+        crate::trash_ops::list().context("Failed to list Recycle Bin contents")?;
 
     // Create a map of Recycle Bin items by normalized original path
     let mut bin_map: std::collections::HashMap<String, &trash::TrashItem> =
@@ -1919,7 +1919,7 @@ fn perform_restore_all_bin(
 ) -> anyhow::Result<restore::RestoreResult> {
     // Get current Recycle Bin contents
     let recycle_bin_items =
-        trash::os_limited::list().context("Failed to list Recycle Bin contents")?;
+        crate::trash_ops::list().context("Failed to list Recycle Bin contents")?;
 
     if recycle_bin_items.is_empty() {
         return Ok(restore::RestoreResult::default());
@@ -1971,7 +1971,7 @@ fn perform_restore_all_bin(
         let _ = terminal.draw(|f| render(f, app_state));
 
         // Try bulk restore
-        match trash::os_limited::restore_all(batch.iter().cloned()) {
+        match crate::trash_ops::restore_all(batch.iter().cloned()) {
             Ok(()) => {
                 // Bulk restore succeeded
                 for item in batch {

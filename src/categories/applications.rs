@@ -1145,7 +1145,7 @@ pub fn is_still_installed(install_location: &Path) -> bool {
 
 /// Clean (delete) an installed application directory by moving it to the Recycle Bin
 pub fn clean(path: &Path) -> Result<()> {
-    trash::delete(path).with_context(|| {
+    crate::trash_ops::delete(path).with_context(|| {
         format!(
             "Failed to delete installed application directory: {}",
             path.display()

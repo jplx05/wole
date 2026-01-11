@@ -6,7 +6,6 @@ use anyhow::{Context, Result};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
-use trash;
 use walkdir::WalkDir;
 
 /// Scan for empty folders in user directories
@@ -213,7 +212,7 @@ pub fn clean(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
-    trash::delete(path)
+    crate::trash_ops::delete(path)
         .with_context(|| format!("Failed to delete empty folder: {}", path.display()))?;
     Ok(())
 }

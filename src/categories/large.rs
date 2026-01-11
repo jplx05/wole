@@ -306,7 +306,7 @@ pub fn get_file_type(path: &Path) -> utils::FileType {
 
 /// Clean (delete) a large file by moving it to the Recycle Bin
 pub fn clean(path: &Path) -> Result<()> {
-    trash::delete(path)
+    crate::trash_ops::delete(path)
         .with_context(|| format!("Failed to delete large file: {}", path.display()))?;
     Ok(())
 }

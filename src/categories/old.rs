@@ -297,7 +297,7 @@ fn scan_directory(
 
 /// Clean (delete) an old file by moving it to the Recycle Bin
 pub fn clean(path: &Path) -> Result<()> {
-    trash::delete(path)
+    crate::trash_ops::delete(path)
         .with_context(|| format!("Failed to delete old file: {}", path.display()))?;
     Ok(())
 }

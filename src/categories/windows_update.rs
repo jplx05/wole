@@ -4,7 +4,6 @@ use crate::utils;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use trash;
 
 /// Scan for Windows Update files that can be cleaned
 ///
@@ -100,7 +99,7 @@ pub fn clean(path: &Path) -> Result<()> {
         return Ok(());
     }
 
-    trash::delete(path)
+    crate::trash_ops::delete(path)
         .with_context(|| format!("Failed to delete Windows Update files: {}", path.display()))?;
     Ok(())
 }

@@ -455,7 +455,7 @@ pub fn scan_with_progress(
 
 /// Clean (delete) an application cache directory by moving it to the Recycle Bin
 pub fn clean(path: &Path) -> Result<()> {
-    trash::delete(path).with_context(|| {
+    crate::trash_ops::delete(path).with_context(|| {
         format!(
             "Failed to delete application cache directory: {}",
             path.display()

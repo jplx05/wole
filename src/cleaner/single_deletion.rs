@@ -43,7 +43,7 @@ pub fn delete_with_precheck(path: &Path, permanent: bool) -> Result<DeleteOutcom
             }
         }
     } else {
-        match trash::delete(path) {
+        match crate::trash_ops::delete(path) {
             Ok(()) => Ok(DeleteOutcome::Deleted),
             Err(err) => {
                 if !path.exists() {
@@ -93,7 +93,8 @@ pub fn clean_path(path: &Path, permanent: bool) -> Result<()> {
     } else {
         // Move to Recycle Bin
         // Note: trash crate should handle long paths internally
-        trash::delete(path).with_context(|| format!("Failed to delete: {}", path.display()))?;
+        crate::trash_ops::delete(path)
+            .with_context(|| format!("Failed to delete: {}", path.display()))?;
     }
     Ok(())
 }

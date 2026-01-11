@@ -1,6 +1,6 @@
 use crate::output::CategoryResult;
+use crate::trash_ops;
 use anyhow::{Context, Result};
-use trash::os_limited;
 
 /// Scan the Recycle Bin for items
 ///
@@ -9,7 +9,7 @@ use trash::os_limited;
 pub fn scan() -> Result<CategoryResult> {
     let mut result = CategoryResult::default();
 
-    match os_limited::list() {
+    match trash_ops::list() {
         Ok(items) => {
             result.items = items.len();
             // TrashItem doesn't expose size, so we just count items
@@ -30,10 +30,10 @@ pub fn scan() -> Result<CategoryResult> {
 
 /// Empty the Recycle Bin by purging all items
 pub fn clean() -> Result<()> {
-    let items = os_limited::list().context("Failed to list Recycle Bin items")?;
+    let items = trash_ops::list().context("Failed to list Recycle Bin items")?;
 
     if !items.is_empty() {
-        os_limited::purge_all(&items).context("Failed to empty Recycle Bin")?;
+        trash_ops::purge_all(&items).context("Failed to empty Recycle Bin")?;
     }
 
     Ok(())

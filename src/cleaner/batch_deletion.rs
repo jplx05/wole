@@ -99,7 +99,7 @@ pub fn clean_paths_batch(paths: &[PathBuf], permanent: bool) -> BatchDeleteResul
 
         if !unlocked.is_empty() {
             // Try batch delete first (fastest path)
-            match trash::delete_all(&unlocked) {
+            match crate::trash_ops::delete_all(&unlocked) {
                 Ok(()) => {
                     success_count += unlocked.len();
                     deleted_paths.extend(unlocked);
@@ -124,7 +124,7 @@ pub fn clean_paths_batch(paths: &[PathBuf], permanent: bool) -> BatchDeleteResul
 
                         let mut new_remaining: Vec<PathBuf> = Vec::new();
                         for batch in batches {
-                            match trash::delete_all(&batch) {
+                            match crate::trash_ops::delete_all(&batch) {
                                 Ok(()) => {
                                     success_count += batch.len();
                                     deleted_paths.extend(batch);
@@ -159,7 +159,7 @@ pub fn clean_paths_batch(paths: &[PathBuf], permanent: bool) -> BatchDeleteResul
                                 deleted_paths.push(path);
                                 continue;
                             }
-                            match trash::delete(&path) {
+                            match crate::trash_ops::delete(&path) {
                                 Ok(()) => {
                                     success_count += 1;
                                     deleted_paths.push(path.clone());

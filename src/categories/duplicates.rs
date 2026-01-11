@@ -512,8 +512,7 @@ pub fn clean(groups: &[DuplicateGroup], permanent: bool) -> Result<()> {
                 std::fs::remove_file(path)
                     .with_context(|| format!("Failed to permanently delete: {}", path.display()))?;
             } else {
-                use trash;
-                trash::delete(path)
+                crate::trash_ops::delete(path)
                     .with_context(|| format!("Failed to delete: {}", path.display()))?;
             }
         }

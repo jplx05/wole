@@ -4,7 +4,6 @@ use crate::utils;
 use anyhow::{Context, Result};
 use std::env;
 use std::path::{Path, PathBuf};
-use trash;
 use walkdir::WalkDir;
 
 /// Browser cache locations to scan
@@ -296,7 +295,7 @@ pub fn clean(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
-    trash::delete(path)
+    crate::trash_ops::delete(path)
         .with_context(|| format!("Failed to delete browser cache: {}", path.display()))?;
     Ok(())
 }
