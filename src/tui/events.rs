@@ -441,14 +441,6 @@ fn handle_dashboard_event(
                     app_state.screen = crate::tui::state::Screen::RestoreSelection { cursor: 0 };
                 }
                 4 => {
-                    // Config action - show config screen
-                    // Ensure config exists on disk so we can open it
-                    app_state.config = crate::config::Config::load_or_create();
-                    app_state.apply_config_to_state();
-                    app_state.reset_config_editor();
-                    app_state.screen = crate::tui::state::Screen::Config;
-                }
-                5 => {
                     // Optimize action - show optimize screen
                     app_state.screen = crate::tui::state::Screen::Optimize {
                         cursor: 0,
@@ -458,18 +450,20 @@ fn handle_dashboard_event(
                         message: None,
                     };
                 }
-                6 => {
+                5 => {
                     // Status action - show status screen
                     use crate::status::gather_status;
                     use sysinfo::System;
 
+                    // Don't call refresh_all() - gather_status will refresh what it needs
+                    // This avoids blocking on expensive full system refresh
                     let mut system = System::new();
-                    system.refresh_all();
                     match gather_status(&mut system) {
                         Ok(status) => {
                             app_state.screen = crate::tui::state::Screen::Status {
                                 status: Box::new(status),
                                 last_refresh: std::time::Instant::now(),
+                                status_receiver: None,
                             };
                         }
                         Err(e) => {
@@ -477,6 +471,14 @@ fn handle_dashboard_event(
                             // Stay on dashboard
                         }
                     }
+                }
+                6 => {
+                    // Config action - show config screen
+                    // Ensure config exists on disk so we can open it
+                    app_state.config = crate::config::Config::load_or_create();
+                    app_state.apply_config_to_state();
+                    app_state.reset_config_editor();
+                    app_state.screen = crate::tui::state::Screen::Config;
                 }
                 _ => {}
             }
@@ -960,6 +962,8 @@ fn handle_results_event(
             KeyCode::Up | KeyCode::Down => {
                 // Mark that we navigated so space can toggle selection
                 app_state.search_navigated = true;
+                // Exit search mode when navigating so navigation works smoothly
+                app_state.search_mode = false;
                 // Fall through to normal navigation handling
             }
             _ => return EventResult::Continue,
@@ -1866,13 +1870,36 @@ fn handle_confirm_event(
                     folder_idx,
                     ..
                 } => {
-                    // Toggle all items in this folder
+                    // Toggle all items in this folder (including child folders)
                     let confirm_groups = app_state.confirm_category_groups();
                     if let Some(group) = confirm_groups.get(cat_idx) {
-                        if let Some(folder) = group.folder_groups.get(folder_idx) {
-                            let folder_items: Vec<usize> = folder.items.clone();
-                            app_state.toggle_items(folder_items);
+                        if group.folder_groups.is_empty() {
+                            return EventResult::Continue;
                         }
+                        
+                        // Build folder hierarchy to find children
+                        let scan_path = &app_state.scan_path;
+                        let hierarchy = crate::tui::state::build_folder_hierarchy(
+                            scan_path,
+                            &group.name,
+                            &group.folder_groups,
+                        );
+                        
+                        // Recursively collect items from this folder and all its children
+                        fn collect_subtree_items(
+                            folder_idx: usize,
+                            group: &crate::tui::state::CategoryGroup,
+                            children: &[Vec<usize>],
+                        ) -> Vec<usize> {
+                            let mut items = group.folder_groups[folder_idx].items.clone();
+                            for &child_idx in &children[folder_idx] {
+                                items.extend(collect_subtree_items(child_idx, group, children));
+                            }
+                            items
+                        }
+                        
+                        let folder_items = collect_subtree_items(folder_idx, group, &hierarchy.children);
+                        app_state.toggle_items(folder_items);
                     }
                 }
                 crate::tui::state::ConfirmRow::CategoryHeader { cat_idx } => {
@@ -2787,8 +2814,9 @@ fn handle_status_event(
     _modifiers: KeyModifiers,
 ) -> EventResult {
     if let crate::tui::state::Screen::Status {
-        ref mut status,
-        ref mut last_refresh,
+        status: _,
+        last_refresh: _,
+        ref mut status_receiver,
     } = app_state.screen
     {
         match key {
@@ -2798,21 +2826,14 @@ fn handle_status_event(
                 EventResult::Continue
             }
             KeyCode::Char('r') | KeyCode::Char('R') => {
-                // Refresh status
-                use crate::status::gather_status;
-                use sysinfo::System;
-
-                let mut system = System::new();
-                system.refresh_all();
-                match gather_status(&mut system) {
-                    Ok(new_status) => {
-                        **status = new_status;
-                        *last_refresh = std::time::Instant::now();
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to refresh system status: {}", e);
-                    }
-                }
+                // Refresh status (use async to avoid blocking UI)
+                use crate::status::gather_status_async;
+                
+                // Clear any existing receiver and start new refresh
+                *status_receiver = None;
+                let (tx, rx) = std::sync::mpsc::channel();
+                *status_receiver = Some(rx);
+                gather_status_async(tx);
                 EventResult::Continue
             }
             #[cfg(windows)]

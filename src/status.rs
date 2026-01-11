@@ -409,7 +409,19 @@ pub struct BootInfo {
     pub shutdown_type: String,
 }
 
-/// Gather current system status
+/// Gather status asynchronously in a background thread
+/// This allows the UI to remain responsive while gathering system metrics
+pub fn gather_status_async(
+    sender: std::sync::mpsc::Sender<Result<SystemStatus>>,
+) {
+    std::thread::spawn(move || {
+        use sysinfo::System;
+        let mut system = System::new();
+        let result = gather_status(&mut system);
+        let _ = sender.send(result);
+    });
+}
+
 pub fn gather_status(system: &mut System) -> Result<SystemStatus> {
     // Use thread-local state for delta tracking
     METRICS_STATE.with(|state_cell| {
@@ -421,13 +433,16 @@ pub fn gather_status(system: &mut System) -> Result<SystemStatus> {
         // CPU needs two refreshes for accurate usage calculation
         system.refresh_cpu_all();
 
-        // Small delay for CPU measurements (reduced from 100ms to 20ms for responsiveness)
-        std::thread::sleep(Duration::from_millis(20));
+        // Reduced delay for CPU measurements (from 20ms to 10ms for better responsiveness)
+        // This is still needed for accurate CPU usage calculation
+        std::thread::sleep(Duration::from_millis(10));
         system.refresh_cpu_all();
 
         // Refresh other metrics
         system.refresh_memory();
-        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        // Optimize: Refresh processes without full details (false) to reduce overhead
+        // We only need basic info for top processes, not full process details
+        system.refresh_processes(sysinfo::ProcessesToUpdate::All, false);
 
         // Gather hardware info
         let hardware = gather_hardware_info(system);

@@ -63,6 +63,7 @@ fn render_content(f: &mut Frame, area: Rect, app_state: &AppState, _is_small: bo
     if let crate::tui::state::Screen::Status {
         status,
         last_refresh,
+        status_receiver: _,
     } = &app_state.screen
     {
         // Header with health score and live indicator
@@ -108,7 +109,7 @@ fn render_status_header_with_indicator(
         _ => Styles::error(),
     };
 
-    // Split into two lines
+    // Split into two lines (no separator between them)
     let lines = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Length(1)])
@@ -134,7 +135,7 @@ fn render_status_header_with_indicator(
         .alignment(Alignment::Right);
     f.render_widget(live_para, health_chunks[1]);
 
-    // Line 2: Device information with uptime
+    // Line 2: Device information with uptime (no separator line above)
     let uptime_str = format_uptime(status.hardware.uptime_seconds);
     let device_text = format!(
         "{} · {} · {:.1}GB · {} · Uptime: {}",

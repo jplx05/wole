@@ -382,7 +382,7 @@ fn format_number(n: u64) -> String {
 }
 
 fn format_size(bytes: u64) -> String {
-    bytesize::to_string(bytes, true)
+    bytesize::to_string(bytes, false)
 }
 
 fn print_category_header(name: &str, size: u64, _count: usize) {

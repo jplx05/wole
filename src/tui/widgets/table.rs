@@ -35,7 +35,7 @@ pub fn render_results_table(
     // Summary header
     let summary = format!(
         "{} reclaimable ── {} items",
-        bytesize::to_string(total_size, true),
+        bytesize::to_string(total_size, false),
         total_count
     );
     let header = Paragraph::new(Line::from(vec![
@@ -96,7 +96,7 @@ pub fn render_results_table(
         };
 
         // Size
-        let size_str = bytesize::to_string(item.size_bytes, true);
+        let size_str = bytesize::to_string(item.size_bytes, false);
 
         // Age
         let age_str = item

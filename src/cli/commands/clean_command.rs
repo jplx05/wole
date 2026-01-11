@@ -293,7 +293,7 @@ pub(crate) fn handle_clean(
                 println!(
                     "  {} Total file bytes indexed: {}",
                     Theme::muted("→"),
-                    Theme::primary(&bytesize::to_string(total_storage, true))
+                    Theme::primary(&bytesize::to_string(total_storage, false))
                 );
 
                 if let Some((total, avail)) = get_disk_space_for_path(&scan_path) {
@@ -302,9 +302,9 @@ pub(crate) fn handle_clean(
                     println!(
                         "  {} Disk (OS): {} used / {} total ({} free, ~{:.0} GB total)",
                         Theme::muted("→"),
-                        Theme::primary(&bytesize::to_string(used, true)),
-                        Theme::primary(&bytesize::to_string(total, true)),
-                        Theme::primary(&bytesize::to_string(avail, true)),
+                        Theme::primary(&bytesize::to_string(used, false)),
+                        Theme::primary(&bytesize::to_string(total, false)),
+                        Theme::primary(&bytesize::to_string(avail, false)),
                         total_gb
                     );
                 }

@@ -214,7 +214,7 @@ pub fn clean_all(
         print!(
             "Delete {} items ({})? [yes/no]: ",
             Theme::value(&total_items.to_string()),
-            Theme::warning(&bytesize::to_string(total_bytes, true))
+            Theme::warning(&bytesize::to_string(total_bytes, false))
         );
 
         let input = read_line_from_stdin()?;
@@ -866,21 +866,21 @@ pub fn clean_all(
             println!(
                 "[DRY RUN] Complete: {} items would be cleaned ({}), {} errors",
                 Theme::value(&cleaned.to_string()),
-                Theme::size(&bytesize::to_string(cleaned_bytes, true)),
+                Theme::size(&bytesize::to_string(cleaned_bytes, false)),
                 Theme::error(&errors.to_string())
             );
         } else if errors > 0 {
             println!(
                 "[WARNING] Cleanup complete: {} items cleaned ({}), {} errors",
                 Theme::success(&cleaned.to_string()),
-                Theme::success(&bytesize::to_string(cleaned_bytes, true)),
+                Theme::success(&bytesize::to_string(cleaned_bytes, false)),
                 Theme::error(&errors.to_string())
             );
         } else {
             println!(
                 "[OK] Cleanup complete: {} items cleaned, {} freed!",
                 Theme::success(&cleaned.to_string()),
-                Theme::success(&bytesize::to_string(cleaned_bytes, true))
+                Theme::success(&bytesize::to_string(cleaned_bytes, false))
             );
         }
 

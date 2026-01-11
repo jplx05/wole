@@ -132,7 +132,7 @@ fn render_delete_preview(
         Line::from(vec![
             Span::styled("  Size: ", Styles::header()),
             Span::styled(
-                bytesize::to_string(item.size_bytes, true),
+                bytesize::to_string(item.size_bytes, false),
                 Styles::emphasis(),
             ),
         ]),

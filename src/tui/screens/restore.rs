@@ -104,7 +104,7 @@ fn render_content(f: &mut Frame, area: Rect, app_state: &AppState, _is_small: bo
                 lines.push(Line::from(vec![
                     Span::styled("Size: ", Styles::primary()),
                     Span::styled(
-                        bytesize::to_string(restore_result.restored_bytes, true),
+                        bytesize::to_string(restore_result.restored_bytes, false),
                         Styles::success(),
                     ),
                 ]));

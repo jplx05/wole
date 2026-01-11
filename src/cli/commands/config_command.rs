@@ -89,7 +89,7 @@ pub(crate) fn handle_config(
         println!("  Max age: {} days", config.cache.max_age_days);
         println!(
             "  Content hash threshold: {}",
-            bytesize::to_string(config.cache.content_hash_threshold_bytes, true)
+            bytesize::to_string(config.cache.content_hash_threshold_bytes, false)
         );
         println!();
         if let Ok(path) = Config::config_path() {
@@ -202,7 +202,7 @@ pub(crate) fn handle_config(
         println!("  Max age: {} days", config.cache.max_age_days);
         println!(
             "  Content hash threshold: {}",
-            bytesize::to_string(config.cache.content_hash_threshold_bytes, true)
+            bytesize::to_string(config.cache.content_hash_threshold_bytes, false)
         );
         println!();
         if let Ok(path) = Config::config_path() {

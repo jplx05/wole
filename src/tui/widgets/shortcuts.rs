@@ -87,7 +87,6 @@ pub fn get_shortcuts(
             if app_state.map(|s| s.search_mode).unwrap_or(false) {
                 vec![
                     ("Type", "Search"),
-                    ("Enter", "Done"),
                     ("Esc", "Exit search"),
                     ("↑↓", "Navigate"),
                 ]
@@ -148,13 +147,37 @@ pub fn get_shortcuts(
             vec![("↑↓", "Navigate"), ("Enter", "Select"), ("Esc/B/Q", "Back")]
         }
         crate::tui::state::Screen::Restore { .. } => vec![("Esc/B/Q", "Back to Dashboard")],
-        crate::tui::state::Screen::DiskInsights { .. } => vec![
-            ("↑↓", "Navigate"),
-            ("Enter", "Drill In"),
-            ("Backspace", "Go Back"),
-            ("S", "Sort"),
-            ("Q/Esc", "Quit"),
-        ],
+        crate::tui::state::Screen::DiskInsights { .. } => {
+            if app_state.map(|s| s.search_mode).unwrap_or(false) {
+                vec![
+                    ("Type", "Search"),
+                    ("Esc", "Exit search"),
+                    ("↑↓", "Navigate"),
+                ]
+            } else if app_state
+                .map(|s| !s.search_query.is_empty())
+                .unwrap_or(false)
+            {
+                vec![
+                    ("↑↓", "Navigate"),
+                    ("Enter", "Drill In"),
+                    ("Backspace", "Go Back"),
+                    ("S", "Sort"),
+                    ("/", "Search"),
+                    ("Esc", "Clear Filter"),
+                    ("Q", "Quit"),
+                ]
+            } else {
+                vec![
+                    ("↑↓", "Navigate"),
+                    ("Enter", "Drill In"),
+                    ("Backspace", "Go Back"),
+                    ("S", "Sort"),
+                    ("/", "Search"),
+                    ("Q/Esc", "Quit"),
+                ]
+            }
+        }
         crate::tui::state::Screen::Status { .. } => vec![("Esc/Q", "Back"), ("R", "Refresh")],
         crate::tui::state::Screen::Optimize { .. } => {
             if app_state

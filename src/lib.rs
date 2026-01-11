@@ -8,6 +8,7 @@ pub mod cleaner;
 pub mod cli;
 pub mod config;
 pub mod disk_usage;
+mod disk_usage_cache;
 pub mod git;
 pub mod history;
 pub mod optimize;

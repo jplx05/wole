@@ -2,7 +2,7 @@
 
 use crate::tui::{
     state::AppState,
-    theme::{category_style, Styles},
+    theme::Styles,
     widgets::{
         logo::{render_logo, render_tagline, LOGO_WITH_TAGLINE_HEIGHT},
         shortcuts::{get_shortcuts, render_shortcuts},
@@ -17,6 +17,7 @@ use ratatui::{
     Frame,
 };
 use std::time::SystemTime;
+use chrono;
 
 // Helper function to format numbers with commas
 fn format_number(n: u64) -> String {
@@ -175,8 +176,19 @@ fn category_emoji(category_name: &str) -> &'static str {
 }
 
 /// Get emoji for a folder based on dominant file type in its items
+/// Uses deterministic sorting to prevent recalculation changes
 fn folder_emoji(app_state: &AppState, folder: &crate::tui::state::FolderGroup) -> &'static str {
     use std::collections::HashMap;
+
+    // Special case: if only one item, use its file type directly (no recalculation needed)
+    if folder.items.len() == 1 {
+        if let Some(&item_idx) = folder.items.first() {
+            if let Some(item) = app_state.all_items.get(item_idx) {
+                return detect_file_type(&item.path).emoji();
+            }
+        }
+        return "📁"; // Default if item not found
+    }
 
     // Count file types in this folder
     let mut type_counts: HashMap<FileType, usize> = HashMap::new();
@@ -188,8 +200,21 @@ fn folder_emoji(app_state: &AppState, folder: &crate::tui::state::FolderGroup) -
         }
     }
 
-    // Find the dominant file type
-    if let Some((dominant_type, _)) = type_counts.iter().max_by_key(|(_, &count)| count) {
+    // Find the dominant file type with deterministic tie-breaking
+    // Convert to Vec and sort for stable, deterministic ordering
+    let mut type_vec: Vec<(&FileType, &usize)> = type_counts.iter().collect();
+    // Sort by count descending, then by FileType Debug representation for stability
+    type_vec.sort_by(|a, b| {
+        // First compare by count (descending)
+        let count_cmp = b.1.cmp(a.1);
+        if count_cmp != std::cmp::Ordering::Equal {
+            return count_cmp;
+        }
+        // If counts are equal, compare by FileType Debug representation for deterministic result
+        format!("{:?}", a.0).cmp(&format!("{:?}", b.0))
+    });
+    
+    if let Some((dominant_type, _)) = type_vec.first() {
         dominant_type.emoji()
     } else {
         "📁" // Default folder emoji if no items
@@ -217,6 +242,62 @@ fn format_ago(t: Option<SystemTime>) -> String {
         format!("{}w ago", secs / (86400 * 7))
     } else {
         format!("{}y ago", secs / (86400 * 365))
+    }
+}
+
+fn format_date(t: Option<SystemTime>) -> String {
+    let Some(t) = t else {
+        return "--".to_string();
+    };
+    // Convert SystemTime to DateTime<Local>
+    let datetime = match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => {
+            chrono::DateTime::<chrono::Utc>::from_timestamp(
+                duration.as_secs() as i64,
+                duration.subsec_nanos(),
+            )
+            .map(|dt: chrono::DateTime<chrono::Utc>| dt.with_timezone(&chrono::Local))
+        }
+        Err(_) => return "--".to_string(),
+    };
+    
+    if let Some(dt) = datetime {
+        let now = chrono::Local::now();
+        let days_diff = (now.date_naive() - dt.date_naive()).num_days();
+        
+        // Format as relative dates
+        match days_diff {
+            0 => "today".to_string(),
+            1 => "yesterday".to_string(),
+            d if d > 1 && d < 7 => format!("{}d ago", d),
+            d if d >= 7 && d < 30 => {
+                let weeks = d / 7;
+                if weeks == 1 {
+                    "1w ago".to_string()
+                } else {
+                    format!("{}w ago", weeks)
+                }
+            }
+            d if d >= 30 && d < 365 => {
+                let months = d / 30;
+                if months == 1 {
+                    "1mo ago".to_string()
+                } else {
+                    format!("{}mo ago", months)
+                }
+            }
+            d if d >= 365 => {
+                let years = d / 365;
+                if years == 1 {
+                    "1y ago".to_string()
+                } else {
+                    format!("{}y ago", years)
+                }
+            }
+            _ => "--".to_string(), // Future dates or invalid
+        }
+    } else {
+        "--".to_string()
     }
 }
 
@@ -282,7 +363,7 @@ fn fun_comparison(bytes: u64) -> Option<String> {
     const GB: u64 = 1_000_000_000;
 
     let game_size: u64 = 50 * GB; // ~50 GB for AAA game
-    let node_modules_size: u64 = 500 * MB; // ~500 MB average node_modules
+    let hd_video_hour: u64 = 1_500 * MB; // ~1.5 GB per hour of HD video
     let floppy_size: u64 = 1_440_000; // 1.44 MB floppy disk
 
     if bytes >= 10 * GB {
@@ -294,9 +375,13 @@ fn fun_comparison(bytes: u64) -> Option<String> {
             Some(format!("a partial game install (~{:.1} GB)", gb))
         }
     } else if bytes >= 500 * MB {
-        let count = bytes / node_modules_size;
+        let hours = bytes / hd_video_hour;
         let gb = bytes as f64 / GB as f64;
-        Some(format!("~{} node_modules folders (~{:.1} GB)", count, gb))
+        if hours >= 1 {
+            Some(format!("~{} hours of HD video (~{:.1} GB)", hours, gb))
+        } else {
+            Some(format!("~{:.1} hours of HD video (~{:.1} GB)", bytes as f64 / hd_video_hour as f64, gb))
+        }
     } else if bytes >= 10 * MB {
         let count = bytes / floppy_size;
         let mb = bytes as f64 / MB as f64;
@@ -347,7 +432,7 @@ pub fn render(f: &mut Frame, app_state: &mut AppState) {
         Span::styled(format!("{}", selected_count), Styles::checked()),
         Span::styled(" │ ", Styles::secondary()),
         Span::styled("Reclaimable: ", Styles::secondary()),
-        Span::styled(bytesize::to_string(total_size, true), Styles::emphasis()),
+        Span::styled(bytesize::to_string(total_size, false), Styles::emphasis()),
         Span::styled(" │ ", Styles::secondary()),
         Span::styled("Categories: ", Styles::secondary()),
         Span::styled(format!("{}", categories_count), Styles::emphasis()),
@@ -364,20 +449,20 @@ pub fn render(f: &mut Frame, app_state: &mut AppState) {
 
             line2_spans.push(Span::styled("Current storage: ", Styles::secondary()));
             line2_spans.push(Span::styled(
-                bytesize::to_string(current_storage, true),
+                bytesize::to_string(current_storage, false),
                 Styles::emphasis(),
             ));
             line2_spans.push(Span::styled(" │ ", Styles::secondary()));
             line2_spans.push(Span::styled("Storage after: ", Styles::secondary()));
             line2_spans.push(Span::styled(
-                bytesize::to_string(storage_after, true),
+                bytesize::to_string(storage_after, false),
                 Styles::emphasis(),
             ));
         } else {
             // Show free space (original behavior)
             line2_spans.push(Span::styled("Free space: ", Styles::secondary()));
             line2_spans.push(Span::styled(
-                bytesize::to_string(disk.free_bytes, true),
+                bytesize::to_string(disk.free_bytes, false),
                 Styles::emphasis(),
             ));
         }
@@ -407,7 +492,7 @@ pub fn render(f: &mut Frame, app_state: &mut AppState) {
             ),
             Span::styled(" │ ", Styles::secondary()),
             Span::styled(
-                format!("{} indexed", bytesize::to_string(total_storage, true)),
+                format!("{} indexed", bytesize::to_string(total_storage, false)),
                 Styles::primary(),
             ),
         ]));
@@ -755,9 +840,9 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                         } else {
                             crate::utils::to_relative_path(&item.path, &app_state.scan_path)
                         };
-                        let size_str = bytesize::to_string(item.size_bytes, true);
-                        let ago_str = if item.category == "Installed Applications" {
-                            Some(format_ago(item.last_opened))
+                        let size_str = bytesize::to_string(item.size_bytes, false);
+                        let date_str = if item.category == "Installed Applications" {
+                            Some(format_date(item.last_opened))
                         } else {
                             None
                         };
@@ -769,6 +854,31 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                         // Add emoji based on file type
                         let file_type = detect_file_type(&item.path);
                         let emoji = file_type.emoji();
+                        
+                        // Calculate fixed widths for metadata columns
+                        // Size column: 8 chars (e.g., "793.7 MiB")
+                        // Date column: 3 chars (" | ") + up to 10 chars (e.g., "yesterday", "2mo ago")
+                        let date_width = if date_str.is_some() { 3 + 10 } else { 0 };
+                        let metadata_width = 8 + date_width;
+                        
+                        let fixed_prefix = indent.len()
+                            + 3 /*checkbox*/
+                            + 1 /*space*/
+                            + 3 /*emoji + space*/;
+                        
+                        // Calculate available width for file name - better alignment, not too far right
+                        let min_name_width = 8; // Minimum for readability
+                        let max_name_width = (inner.width as usize)
+                            .saturating_sub(fixed_prefix)
+                            .saturating_sub(metadata_width);
+                        
+                        let name_column_width = max_name_width.max(min_name_width);
+                        
+                        // Truncate file name if needed, pad to ensure metadata alignment
+                        let display_str_truncated = truncate_end(&display_str, name_column_width);
+                        let padding_needed = name_column_width.saturating_sub(display_str_truncated.chars().count());
+                        let display_str_padded = format!("{}{}", display_str_truncated, " ".repeat(padding_needed));
+                        
                         let base_style = Styles::primary();
                         let hl_style =
                             base_style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
@@ -779,15 +889,15 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                             Span::styled(format!("{} ", emoji), Styles::secondary()),
                         ];
                         spans.extend(spans_with_highlight(
-                            &display_str,
+                            &display_str_padded,
                             &highlight_query,
                             base_style,
                             hl_style,
                         ));
                         spans.extend([
-                            Span::styled(format!("  {:>8}", size_str), Styles::secondary()),
-                            if let Some(ago) = ago_str {
-                                Span::styled(format!(" | {:>8}", ago), Styles::secondary())
+                            Span::styled(format!("{:>8}", size_str), Styles::secondary()),
+                            if let Some(date) = date_str {
+                                Span::styled(format!(" | {:>10}", date), Styles::secondary())
                             } else {
                                 Span::raw("")
                             },
@@ -861,8 +971,6 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                 };
                 folder_stack.clear();
 
-                let icon = if group.safe { "✓" } else { "!" };
-                let icon_style = category_style(group.safe);
                 let category_emoji_icon = category_emoji(&group.name);
 
                 let item_indices = app_state.category_item_indices(group_idx);
@@ -883,14 +991,14 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                     Span::styled(format!(" {} ", prefix), row_style),
                     Span::styled(checkbox, apply_sel(checkbox_style)),
                     Span::styled(" ", row_style),
-                    Span::styled(format!("{} {} ", exp_marker, icon), apply_sel(icon_style)),
+                    Span::styled(format!("{} ", exp_marker), apply_sel(Styles::secondary())),
                     Span::styled(
                         format!("{} ", category_emoji_icon),
                         apply_sel(Styles::secondary()),
                     ),
                     Span::styled(format!("{:<12}", group.name), apply_sel(Styles::emphasis())),
                     Span::styled(
-                        format!("{:>8}", bytesize::to_string(group.total_size, true)),
+                        format!("{:>8}", bytesize::to_string(group.total_size, false)),
                         apply_sel(Styles::primary()),
                     ),
                     Span::styled("    ", apply_sel(Styles::secondary())),
@@ -964,7 +1072,7 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                         }
                     }
                 }
-                let size_str = bytesize::to_string(folder.total_size, true);
+                let size_str = bytesize::to_string(folder.total_size, false);
                 let folder_emoji_icon = folder_emoji(app_state, folder);
 
                 // Indent folder headers by nesting depth.
@@ -1064,9 +1172,9 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                     pstr
                 };
 
-                let size_str = bytesize::to_string(item.size_bytes, true);
-                let ago_str = if item.category == "Installed Applications" {
-                    Some(format_ago(item.last_opened))
+                let size_str = bytesize::to_string(item.size_bytes, false);
+                let date_str = if item.category == "Installed Applications" {
+                    Some(format_date(item.last_opened))
                 } else {
                     None
                 };
@@ -1075,16 +1183,30 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                 let file_type = detect_file_type(&item.path);
                 let emoji = file_type.emoji();
 
-                let fixed = indent.len()
+                // Calculate fixed widths for metadata columns
+                // Size column: 2 spaces + 8 chars (e.g., "793.7 MiB")
+                // Date column: 3 chars (" | ") + up to 10 chars (e.g., "yesterday", "2mo ago")
+                let date_width = if date_str.is_some() { 3 + 10 } else { 0 };
+                let metadata_width = 2 + 8 + date_width;
+                
+                let fixed_prefix = indent.len()
                     + 3 /*prefix+spaces*/
                     + 3 /*checkbox*/
                     + 1 /*space*/
-                    + 3 /*emoji + space*/
-                    + 2 /*two spaces before size*/
-                    + 8 /*size*/
-                    + if ago_str.is_some() { 3 /*" | "*/ + 8 /*ago*/ } else { 0 };
-                let max_len = (inner.width as usize).saturating_sub(fixed).max(8);
-                let path_display = truncate_end(&path_str, max_len);
+                    + 3 /*emoji + space*/;
+                
+                // Calculate available width for file name - better alignment, not too far right
+                let min_name_width = 8; // Minimum for readability
+                let max_name_width = (inner.width as usize)
+                    .saturating_sub(fixed_prefix)
+                    .saturating_sub(metadata_width);
+                
+                let name_column_width = max_name_width.max(min_name_width);
+                
+                // Truncate file name if needed, pad to ensure metadata alignment
+                let path_display = truncate_end(&path_str, name_column_width);
+                let padding_needed = name_column_width.saturating_sub(path_display.chars().count());
+                let path_display_padded = format!("{}{}", path_display, " ".repeat(padding_needed));
 
                 // Add underline to path when cursor is on this item
                 let path_style = if is_cursor {
@@ -1101,15 +1223,15 @@ fn render_grouped_results(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                     Span::styled(format!("{} ", emoji), apply_sel(Styles::secondary())),
                 ];
                 item_spans.extend(spans_with_highlight(
-                    &path_display,
+                    &path_display_padded,
                     &highlight_query,
                     path_style,
                     path_hl_style,
                 ));
                 item_spans.extend([
                     Span::styled(format!("  {:>8}", size_str), apply_sel(Styles::secondary())),
-                    if let Some(ago) = ago_str {
-                        Span::styled(format!(" | {:>8}", ago), apply_sel(Styles::secondary()))
+                    if let Some(date) = date_str {
+                        Span::styled(format!(" | {:>10}", date), apply_sel(Styles::secondary()))
                     } else {
                         Span::raw("")
                     },

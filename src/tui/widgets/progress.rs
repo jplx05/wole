@@ -28,7 +28,7 @@ pub fn render_progress_bar(
             "{}: {} {}",
             label,
             status,
-            size.map(|s| bytesize::to_string(s, true))
+            size.map(|s| bytesize::to_string(s, false))
                 .unwrap_or_else(|| "---".to_string())
         );
         let paragraph = Paragraph::new(text).style(Styles::primary());
@@ -135,7 +135,7 @@ pub fn render_progress_bar(
 
     // Render size and status on the right side (no percentage)
     let size_text = if let Some(size_bytes) = size {
-        bytesize::to_string(size_bytes, true)
+        bytesize::to_string(size_bytes, false)
     } else {
         "---".to_string()
     };

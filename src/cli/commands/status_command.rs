@@ -24,8 +24,9 @@ pub(crate) fn handle_status(json: bool, _watch: bool) -> anyhow::Result<()> {
         use crate::status::gather_status;
         use sysinfo::System;
 
+        // Don't call refresh_all() - gather_status will refresh what it needs
+        // This avoids blocking on expensive full system refresh
         let mut system = System::new();
-        system.refresh_all();
 
         match gather_status(&mut system) {
             Ok(status) => {
@@ -33,6 +34,7 @@ pub(crate) fn handle_status(json: bool, _watch: bool) -> anyhow::Result<()> {
                 app_state.screen = crate::tui::state::Screen::Status {
                     status: Box::new(status),
                     last_refresh: std::time::Instant::now(),
+                    status_receiver: None,
                 };
                 crate::tui::run(Some(app_state))?;
                 Ok(())

@@ -634,7 +634,7 @@ fn perform_full_disk_traversal_cli_grouped(
                                         "✓ Scanned {}: {} files, {}",
                                         folder_name,
                                         file_count,
-                                        bytesize::to_string(*total_size, true)
+                                        bytesize::to_string(*total_size, false)
                                     );
                                 }
                             }
@@ -728,7 +728,7 @@ fn perform_full_disk_traversal_cli_grouped(
                     "✓ Scanned {}: {} files, {}",
                     folder_name,
                     file_count,
-                    bytesize::to_string(*total_size, true)
+                    bytesize::to_string(*total_size, false)
                 );
             }
         }

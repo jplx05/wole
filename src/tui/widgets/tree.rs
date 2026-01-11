@@ -17,7 +17,7 @@ pub fn render_tree(f: &mut Frame, area: Rect, path: &PathBuf, size_bytes: u64, b
     // In a full implementation, this would recursively build the tree
 
     let path_str = utils::to_relative_path(path, base_path);
-    let size_str = bytesize::to_string(size_bytes, true);
+    let size_str = bytesize::to_string(size_bytes, false);
 
     // Get file metadata for additional info
     let metadata = std::fs::metadata(path).ok();

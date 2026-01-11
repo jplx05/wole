@@ -3,13 +3,14 @@
 use crate::utils;
 use anyhow::Result;
 use jwalk::WalkDir;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Represents a file in a directory
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileInfo {
     pub path: PathBuf,
     pub name: String,
@@ -17,7 +18,7 @@ pub struct FileInfo {
 }
 
 /// Represents a folder node in the directory tree
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderNode {
     pub path: PathBuf,
     pub name: String,
@@ -29,13 +30,36 @@ pub struct FolderNode {
 }
 
 /// Complete disk insights data
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskInsights {
     pub root: FolderNode,
     pub total_size: u64,
     pub total_files: u64,
     pub largest_files: Vec<(PathBuf, u64)>, // Top 10 largest files
+    #[serde(with = "duration_serde")]
     pub scan_duration: Duration,
+}
+
+/// Serialize/Deserialize Duration as seconds (f64)
+mod duration_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let secs = duration.as_secs_f64();
+        serializer.serialize_f64(secs)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = f64::deserialize(deserializer)?;
+        Ok(Duration::from_secs_f64(secs))
+    }
 }
 
 /// Sort order for folder display
@@ -46,8 +70,28 @@ pub enum SortBy {
     Files,
 }
 
+/// Progress callback for disk scanning
+/// Called with the path of each file being read
+pub type ProgressCallback = Box<dyn Fn(&Path) + Send + Sync>;
+
 /// Scan a directory and build a folder tree with sizes
+/// If progress_callback is provided, it will be called for each file being read
 pub fn scan_directory(path: &Path, max_depth: u8) -> Result<DiskInsights> {
+    scan_directory_with_progress(path, max_depth, None)
+}
+
+/// Scan a directory with progress reporting
+/// Checks cache first, and saves results to cache after scanning
+pub fn scan_directory_with_progress(
+    path: &Path,
+    max_depth: u8,
+    progress_callback: Option<ProgressCallback>,
+) -> Result<DiskInsights> {
+    // Check cache first
+    if let Ok(Some(cached_insights)) = crate::disk_usage_cache::load_cached_insights(path, max_depth) {
+        return Ok(cached_insights);
+    }
+    
     let start_time = Instant::now();
 
     // First pass: collect all files and their sizes, grouped by directory
@@ -116,6 +160,11 @@ pub fn scan_directory(path: &Path, max_depth: u8) -> Result<DiskInsights> {
                     }
 
                     if e.file_type().is_file() {
+                        // Report progress for this file
+                        if let Some(ref callback) = progress_callback {
+                            callback(&entry_path);
+                        }
+                        
                         if let Ok(meta) = e.metadata() {
                             let size = meta.len();
                             total_size.fetch_add(size, Ordering::Relaxed);
@@ -204,13 +253,18 @@ pub fn scan_directory(path: &Path, max_depth: u8) -> Result<DiskInsights> {
         max_depth,
     )?;
 
-    Ok(DiskInsights {
+    let insights = DiskInsights {
         root,
         total_size,
         total_files,
         largest_files,
         scan_duration: start_time.elapsed(),
-    })
+    };
+    
+    // Save to cache (ignore errors - cache is optional)
+    let _ = crate::disk_usage_cache::save_cached_insights(path, max_depth, &insights);
+    
+    Ok(insights)
 }
 
 /// Build a folder tree from directory size map

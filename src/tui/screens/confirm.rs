@@ -25,7 +25,7 @@ fn fun_comparison(bytes: u64) -> Option<String> {
     const GB: u64 = 1_000_000_000;
 
     let game_size: u64 = 50 * GB; // ~50 GB for AAA game
-    let node_modules_size: u64 = 500 * MB; // ~500 MB average node_modules
+    let hd_video_hour: u64 = 1_500 * MB; // ~1.5 GB per hour of HD video
     let floppy_size: u64 = 1_440_000; // 1.44 MB floppy disk
 
     if bytes >= 10 * GB {
@@ -43,12 +43,19 @@ fn fun_comparison(bytes: u64) -> Option<String> {
             ))
         }
     } else if bytes >= 500 * MB {
-        let count = bytes / node_modules_size;
+        let hours = bytes / hd_video_hour;
         let gb = bytes as f64 / GB as f64;
-        Some(format!(
-            "That's like ~{} node_modules folders (~{:.1} GB)!",
-            count, gb
-        ))
+        if hours >= 1 {
+            Some(format!(
+                "That's like ~{} hours of HD video (~{:.1} GB)!",
+                hours, gb
+            ))
+        } else {
+            Some(format!(
+                "That's like ~{:.1} hours of HD video (~{:.1} GB)!",
+                bytes as f64 / hd_video_hour as f64, gb
+            ))
+        }
     } else if bytes >= 10 * MB {
         let count = bytes / floppy_size;
         let mb = bytes as f64 / MB as f64;
@@ -113,7 +120,7 @@ pub fn render(f: &mut Frame, app_state: &mut AppState) {
                 Styles::emphasis(),
             ),
             Span::styled(
-                format!(" ({})", bytesize::to_string(selected_size, true)),
+                format!(" ({})", bytesize::to_string(selected_size, false)),
                 Styles::secondary(),
             ),
         ]));
@@ -244,7 +251,7 @@ fn render_summary_table(f: &mut Frame, area: Rect, app_state: &AppState) {
         rows.push(Row::new(vec![
             Cell::from(format!("  {}", category)),
             Cell::from(format!("{}", count)),
-            Cell::from(bytesize::to_string(*size, true)),
+            Cell::from(bytesize::to_string(*size, false)),
         ]));
     }
 
@@ -257,7 +264,7 @@ fn render_summary_table(f: &mut Frame, area: Rect, app_state: &AppState) {
     rows.push(Row::new(vec![
         Cell::from("  TOTAL").style(Styles::emphasis()),
         Cell::from(format!("{}", app_state.selected_count())).style(Styles::emphasis()),
-        Cell::from(bytesize::to_string(app_state.selected_size(), true)).style(Styles::emphasis()),
+        Cell::from(bytesize::to_string(app_state.selected_size(), false)).style(Styles::emphasis()),
     ]));
 
     let table = Table::new(
@@ -407,7 +414,7 @@ fn render_file_list(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                     Span::styled(format!("{} {} ", exp_marker, icon), icon_style),
                     Span::styled(format!("{:<12}", group.name), Styles::emphasis()),
                     Span::styled(
-                        format!("{:>8}", bytesize::to_string(group.total_size, true)),
+                        format!("{:>8}", bytesize::to_string(group.total_size, false)),
                         Styles::primary(),
                     ),
                     Span::styled("    ", Styles::secondary()),
@@ -476,7 +483,7 @@ fn render_file_list(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                         }
                     }
                 }
-                let size_str = bytesize::to_string(folder.total_size, true);
+                let size_str = bytesize::to_string(folder.total_size, false);
 
                 // Indent folder headers by nesting depth.
                 let indent = format!("{base_indent}{}", "  ".repeat(depth));
@@ -561,30 +568,49 @@ fn render_file_list(f: &mut Frame, area: Rect, app_state: &mut AppState) {
                     }
                     pstr
                 };
-                let size_str = bytesize::to_string(item.size_bytes, true);
+                let size_str = bytesize::to_string(item.size_bytes, false);
 
                 // Add emoji based on file type
                 let file_type = crate::utils::detect_file_type(&item.path);
                 let emoji = file_type.emoji();
 
-                // Truncate path if needed - more conservative calculation to give more room
-                let fixed = indent.len() + 3 /*prefix+spaces*/ + 3 /*checkbox*/ + 1 /*space*/ + 3 /*emoji + space*/ + 2 /*two spaces before size*/ + 8 + 2 /*extra padding*/;
-                let max_len = (inner.width as usize).saturating_sub(fixed).max(10);
-                let path_display = if path_str.len() > max_len {
+                // Calculate fixed widths for metadata columns (same as results screen)
+                // Size column: 2 spaces + 8 chars (e.g., "793.7 MiB")
+                let metadata_width = 2 + 8;
+                
+                let fixed_prefix = indent.len()
+                    + 3 /*prefix+spaces*/
+                    + 3 /*checkbox*/
+                    + 1 /*space*/
+                    + 3 /*emoji + space*/;
+                
+                // Calculate available width for file name - better alignment, not too far right
+                let min_name_width = 8; // Minimum for readability
+                let max_name_width = (inner.width as usize)
+                    .saturating_sub(fixed_prefix)
+                    .saturating_sub(metadata_width);
+                
+                let name_column_width = max_name_width.max(min_name_width);
+                
+                // Truncate file name if needed, pad to ensure metadata alignment
+                let path_display = if path_str.len() > name_column_width {
                     format!(
                         "...{}",
-                        &path_str[path_str.len().saturating_sub(max_len.saturating_sub(3))..]
+                        &path_str[path_str.len().saturating_sub(name_column_width.saturating_sub(3))..]
                     )
                 } else {
-                    path_str
+                    path_str.clone()
                 };
+                
+                let padding_needed = name_column_width.saturating_sub(path_display.chars().count());
+                let path_display_padded = format!("{}{}", path_display, " ".repeat(padding_needed));
 
                 lines.push(Line::from(vec![
                     Span::styled(format!("{}{} ", indent, prefix), row_style),
                     Span::styled(checkbox, checkbox_style),
                     Span::raw(" "),
                     Span::styled(format!("{} ", emoji), Styles::secondary()),
-                    Span::styled(path_display, Styles::primary()),
+                    Span::styled(path_display_padded, Styles::primary()),
                     Span::styled(format!("  {:>8}", size_str), Styles::secondary()),
                 ]));
                 line_to_row.push(row_idx);

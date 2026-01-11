@@ -17,6 +17,7 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::stdout;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use self::events::{handle_event, handle_mouse_event};
@@ -67,10 +68,11 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
             app_state.tick = app_state.tick.wrapping_add(1);
         }
 
-        // Auto-refresh Status screen every 2 seconds
+        // Auto-refresh Status screen every 2 seconds (using background thread)
         if let crate::tui::state::Screen::Status {
             ref mut status,
             ref mut last_refresh,
+            ref mut status_receiver,
         } = app_state.screen
         {
             // Trigger disk breakdown scan in background on first load if cache is empty
@@ -91,15 +93,40 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
                 }
             }
 
-            if last_refresh.elapsed().as_secs() >= 2 {
-                use crate::status::gather_status;
-                use sysinfo::System;
+            // Check for status updates from background thread (non-blocking)
+            if let Some(ref receiver) = status_receiver {
+                match receiver.try_recv() {
+                    Ok(result) => {
+                        // Clear receiver after receiving result
+                        *status_receiver = None;
+                        match result {
+                            Ok(new_status) => {
+                                **status = new_status;
+                                *last_refresh = std::time::Instant::now();
+                            }
+                            Err(_) => {
+                                // Ignore errors, keep showing old status
+                            }
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        // Still waiting for result, do nothing
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // Thread finished but we missed the result, clear receiver
+                        *status_receiver = None;
+                    }
+                }
+            }
 
-                // Create system and gather status (optimized refresh inside)
-                let mut system = System::new();
-                if let Ok(new_status) = gather_status(&mut system) {
-                    **status = new_status;
-                    *last_refresh = std::time::Instant::now();
+            // Spawn background thread to gather status if it's time to refresh
+            if last_refresh.elapsed().as_secs() >= 2 {
+                // Only spawn if we don't already have a pending refresh
+                if status_receiver.is_none() {
+                    use crate::status::gather_status_async;
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    *status_receiver = Some(rx);
+                    gather_status_async(tx);
                 }
             }
         }
@@ -231,11 +258,11 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
                     progress.current_path = Some(scan_path.clone());
                 }
 
-                // Redraw to show the scanning state before blocking
+                // Redraw to show the scanning state before starting scan
                 terminal.draw(|f| render(f, &mut app_state))?;
 
-                // Perform disk insights scan
-                use crate::disk_usage::{scan_directory, SortBy};
+                // Perform disk insights scan in background thread to allow animation
+                use crate::disk_usage::SortBy;
                 use crate::utils;
 
                 // Determine appropriate depth based on scan path and config
@@ -247,27 +274,107 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
                     config.ui.scan_depth_user
                 };
 
-                match scan_directory(&scan_path, effective_depth) {
-                    Ok(insights) => {
-                        // Check if scan was cancelled
-                        if !matches!(app_state.screen, crate::tui::state::Screen::Scanning { .. }) {
-                            continue;
-                        }
+                // Spawn scan in background thread with progress reporting
+                let (tx, rx) = mpsc::channel();
+                let (progress_tx, progress_rx) = mpsc::channel();
+                let scan_path_clone = scan_path.clone();
+                
+                // Clone progress_tx for the callback
+                let progress_tx_clone = progress_tx.clone();
+                std::thread::spawn(move || {
+                    use crate::disk_usage::scan_directory_with_progress;
+                    let progress_callback: Option<crate::disk_usage::ProgressCallback> = Some(Box::new(move |path: &std::path::Path| {
+                        // Send progress update (ignore errors if receiver is dropped)
+                        let _ = progress_tx_clone.send(path.to_path_buf());
+                    }));
+                    let result = scan_directory_with_progress(&scan_path_clone, effective_depth, progress_callback);
+                    let _ = tx.send(result);
+                });
 
-                        // Show Disk Insights screen
-                        app_state.screen = crate::tui::state::Screen::DiskInsights {
-                            insights,
-                            current_path: scan_path,
-                            cursor: 0,
-                            sort_by: SortBy::Size,
-                        };
-                        app_state.pending_action = crate::tui::state::PendingAction::None;
-                    }
-                    Err(e) => {
-                        // On error, return to dashboard
-                        eprintln!("Disk insights scan error: {}", e);
-                        app_state.screen = crate::tui::state::Screen::Dashboard;
-                        app_state.pending_action = crate::tui::state::PendingAction::None;
+                // Wait for scan result while updating tick and redrawing for animation
+                let mut last_tick_update_scan = std::time::Instant::now();
+                loop {
+                    // Check for scan completion
+                    match rx.try_recv() {
+                        Ok(Ok(insights)) => {
+                            // Check if scan was cancelled
+                            if !matches!(app_state.screen, crate::tui::state::Screen::Scanning { .. }) {
+                                // Scan was cancelled, ignore result and exit loop
+                                break;
+                            }
+
+                            // Show Disk Insights screen
+                            app_state.screen = crate::tui::state::Screen::DiskInsights {
+                                insights,
+                                current_path: scan_path,
+                                cursor: 0,
+                                sort_by: SortBy::Size,
+                            };
+                            app_state.pending_action = crate::tui::state::PendingAction::None;
+                            break;
+                        }
+                        Ok(Err(e)) => {
+                            // On error, return to dashboard
+                            eprintln!("Disk insights scan error: {}", e);
+                            app_state.screen = crate::tui::state::Screen::Dashboard;
+                            app_state.pending_action = crate::tui::state::PendingAction::None;
+                            break;
+                        }
+                        Err(mpsc::TryRecvError::Empty) => {
+                            // Check for progress updates (individual files being read)
+                            while let Ok(file_path) = progress_rx.try_recv() {
+                                if let crate::tui::state::Screen::Scanning { ref mut progress } = app_state.screen {
+                                    progress.current_path = Some(file_path);
+                                }
+                            }
+                            
+                            // Scan still in progress, update tick and redraw for animation
+                            if last_tick_update_scan.elapsed().as_millis() >= 100 {
+                                app_state.tick = app_state.tick.wrapping_add(1);
+                                last_tick_update_scan = std::time::Instant::now();
+                                // Redraw terminal to show spinner animation and current file
+                                let _ = terminal.draw(|f| render(f, &mut app_state));
+                            }
+
+                            // Check for cancellation
+                            if !matches!(app_state.screen, crate::tui::state::Screen::Scanning { .. }) {
+                                // Scan was cancelled, exit loop
+                                break;
+                            }
+
+                            // Process events to allow cancellation
+                            let mut cancelled = false;
+                            while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+                                if let Ok(Event::Key(key)) = event::read() {
+                                    if key.kind == KeyEventKind::Press {
+                                        handle_event(&mut app_state, key.code, key.modifiers);
+                                        if !matches!(
+                                            app_state.screen,
+                                            crate::tui::state::Screen::Scanning { .. }
+                                        ) {
+                                            // Scan was cancelled, mark and exit event loop
+                                            cancelled = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Exit outer loop if cancelled
+                            if cancelled {
+                                break;
+                            }
+
+                            // Small sleep to avoid busy-waiting
+                            std::thread::sleep(Duration::from_millis(16)); // ~60fps
+                        }
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            // Thread panicked or channel closed unexpectedly
+                            eprintln!("Disk insights scan thread error");
+                            app_state.screen = crate::tui::state::Screen::Dashboard;
+                            app_state.pending_action = crate::tui::state::PendingAction::None;
+                            break;
+                        }
                     }
                 }
                 continue;
@@ -337,6 +444,9 @@ pub fn run(initial_state: Option<AppState>) -> Result<()> {
                             app_state.screen = crate::tui::state::Screen::Results;
                         }
                     }
+                    
+                    // Immediately redraw to show results screen without delay
+                    terminal.draw(|f| render(f, &mut app_state))?;
                 }
                 Err(e) => {
                     // On error, return to dashboard

@@ -232,7 +232,7 @@ fn render_body(f: &mut Frame, area: Rect, app_state: &AppState) {
     field_lines.push(Line::from(vec![
         Span::styled("    Hash threshold: ", Styles::secondary()),
         Span::styled(
-            bytesize::to_string(config.cache.content_hash_threshold_bytes, true),
+            bytesize::to_string(config.cache.content_hash_threshold_bytes, false),
             Styles::primary(),
         ),
     ]));

@@ -303,7 +303,7 @@ pub fn scan(_root: &Path, config: &Config, output_mode: OutputMode) -> Result<Ca
         };
 
         for (i, (path, size)) in paths_with_sizes.iter().take(show_count).enumerate() {
-            let size_str = bytesize::to_string(*size, true);
+            let size_str = bytesize::to_string(*size, false);
             println!(
                 "      {} {} ({})",
                 Theme::muted("→"),

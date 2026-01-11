@@ -293,7 +293,7 @@ pub fn scan(_root: &Path, config: &Config, output_mode: OutputMode) -> Result<Ca
                     "    {} Found {} ({})",
                     Theme::muted("•"),
                     app.display_name,
-                    Theme::size(&bytesize::to_string(size, true))
+                    Theme::size(&bytesize::to_string(size, false))
                 );
             }
         }
@@ -369,7 +369,7 @@ pub fn scan(_root: &Path, config: &Config, output_mode: OutputMode) -> Result<Ca
             };
 
             for (i, entry) in apps_with_sizes.iter().take(show_count).enumerate() {
-                let size_str = bytesize::to_string(entry.size, true);
+                let size_str = bytesize::to_string(entry.size, false);
                 println!(
                     "      {} {} ({})",
                     Theme::muted("→"),

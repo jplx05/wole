@@ -126,7 +126,7 @@ pub struct CategoryResult {
 
 impl CategoryResult {
     pub fn size_human(&self) -> String {
-        bytesize::to_string(self.size_bytes, true)
+        bytesize::to_string(self.size_bytes, false)
     }
 }
 
@@ -267,7 +267,7 @@ pub fn print_human_with_options(
                             Theme::muted("└─"),
                             idx + 1,
                             group.paths.len(),
-                            bytesize::to_string(group.size, true)
+                            bytesize::to_string(group.size, false)
                         );
                         for path in &group.paths {
                             let file_type = crate::utils::detect_file_type(path);
@@ -387,7 +387,7 @@ pub fn print_human_with_options(
             (Theme::header("Total"), col_widths[0]),
             (Theme::value(&total_items.to_string()), col_widths[1]),
             (
-                Theme::size(&bytesize::to_string(total_bytes, true)),
+                Theme::size(&bytesize::to_string(total_bytes, false)),
                 col_widths[2],
             ),
             (Theme::success("Reclaimable"), col_widths[3]),
@@ -790,7 +790,7 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
                         Theme::muted("└─"),
                         idx + 1,
                         group.paths.len(),
-                        bytesize::to_string(group.size, true)
+                        bytesize::to_string(group.size, false)
                     );
                     for path in &group.paths {
                         let file_type = crate::utils::detect_file_type(path);
@@ -895,7 +895,7 @@ pub fn print_analyze(results: &ScanResults, mode: OutputMode) {
     print_table_row(&[
         ("Total".to_string(), col_widths[0]),
         (format_number(total_items as u64), col_widths[1]),
-        (bytesize::to_string(total_bytes, true), col_widths[2]),
+        (bytesize::to_string(total_bytes, false), col_widths[2]),
     ]);
     print_table_separator(&col_widths, "└", "┴", "┘");
     println!();
@@ -923,7 +923,7 @@ pub fn print_disk_insights(
         "{}  {}  |  Total: {}  |  {} files",
         Theme::header("Disk Insights"),
         Theme::primary(&root_path.display().to_string()),
-        Theme::size(&bytesize::to_string(insights.total_size, true)),
+        Theme::size(&bytesize::to_string(insights.total_size, false)),
         Theme::value(&format_number(insights.total_files))
     );
     println!();
@@ -935,7 +935,7 @@ pub fn print_disk_insights(
         Theme::secondary("#"),
         root_bar,
         Theme::value("100.0%"),
-        Theme::size(&bytesize::to_string(insights.total_size, true))
+        Theme::size(&bytesize::to_string(insights.total_size, false))
     );
     println!("   {}", Theme::muted(&root_path.display().to_string()));
     println!();
@@ -943,7 +943,7 @@ pub fn print_disk_insights(
     // Show top folders
     for (i, folder) in top_folders.iter().enumerate() {
         let num = i + 1;
-        let size_str = bytesize::to_string(folder.size, true);
+        let size_str = bytesize::to_string(folder.size, false);
         let files_str = format_number(folder.file_count);
 
         // Get display name - use relative path from root if it's deeper than one level
@@ -994,7 +994,7 @@ pub fn print_disk_insights(
             let relative = crate::utils::to_relative_path(file_path, root_path);
             println!(
                 "  {}  {}",
-                Theme::size(&bytesize::to_string(*size, true)),
+                Theme::size(&bytesize::to_string(*size, false)),
                 Theme::muted(&relative)
             );
         }

@@ -25,7 +25,7 @@ fn fun_comparison_short(bytes: u64) -> Option<String> {
     const GB: u64 = 1_000_000_000;
 
     let game_size: u64 = 50 * GB; // ~50 GB for AAA game
-    let node_modules_size: u64 = 500 * MB; // ~500 MB average node_modules
+    let hd_video_hour: u64 = 1_500 * MB; // ~1.5 GB per hour of HD video
     let floppy_size: u64 = 1_440_000; // 1.44 MB floppy disk
 
     if bytes >= 10 * GB {
@@ -36,8 +36,12 @@ fn fun_comparison_short(bytes: u64) -> Option<String> {
             Some("(partial game install!)".to_string())
         }
     } else if bytes >= 500 * MB {
-        let count = bytes / node_modules_size;
-        Some(format!("(~{} node_modules!)", count))
+        let hours = bytes / hd_video_hour;
+        if hours >= 1 {
+            Some(format!("(~{} hours of HD video!)", hours))
+        } else {
+            Some(format!("(~{:.1} hours of HD video!)", bytes as f64 / hd_video_hour as f64))
+        }
     } else if bytes >= 10 * MB {
         let count = bytes / floppy_size;
         Some(format!("(~{} floppies!)", count))
@@ -106,9 +110,14 @@ pub fn render(f: &mut Frame, app_state: &AppState) {
         let elapsed_display = if elapsed_secs < 60 {
             format!("{}s", elapsed_secs)
         } else if elapsed_secs < 3600 {
-            format!("{}m {}s", elapsed_secs / 60, elapsed_secs % 60)
+            let mins = elapsed_secs / 60;
+            let secs = elapsed_secs % 60;
+            format!("{}m {}s", mins, secs)
         } else {
-            format!("{}h {}m", elapsed_secs / 3600, (elapsed_secs % 3600) / 60)
+            let hours = elapsed_secs / 3600;
+            let mins = (elapsed_secs % 3600) / 60;
+            let secs = elapsed_secs % 60;
+            format!("{}h {}m {}s", hours, mins, secs)
         };
 
         // Calculate estimated remaining time based on progress
@@ -331,8 +340,9 @@ pub fn render_cleaning(f: &mut Frame, app_state: &AppState) {
     // Header with animated spinner
     // Use faster animation for cleaning (every 2 ticks instead of default)
     let cleaning_spinner = spinner::get_spinner(app_state.tick * 2);
+    // Show category-specific message in progress bar, keep header generic
     let header = Paragraph::new(Line::from(vec![Span::styled(
-        format!("{}  Cleaning files...", cleaning_spinner),
+        format!("{}  Cleaning...", cleaning_spinner),
         Styles::emphasis(),
     )]))
     .block(
