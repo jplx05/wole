@@ -236,16 +236,43 @@ pub fn scan_all(
 
     // Start scan session if cache is enabled
     let mut scan_id: Option<i64> = None;
-    let use_incremental = scan_cache.is_some() && config.cache.enabled;
+    let mut cache_enabled = scan_cache.is_some() && config.cache.enabled;
+    let mut use_incremental = false;
 
     if let Some(cache) = scan_cache.as_mut() {
-        let categories: Vec<&str> = enabled.iter().map(|(name, _)| *name).collect();
-        let scan_type = if use_incremental && cache.get_previous_scan_id()?.is_some() {
-            "incremental"
-        } else {
-            "full"
-        };
-        scan_id = Some(cache.start_scan(scan_type, &categories)?);
+        if cache_enabled {
+            let categories: Vec<&str> = enabled.iter().map(|(name, _)| *name).collect();
+            let previous_scan_id = match cache.get_previous_scan_id() {
+                Ok(id) => id,
+                Err(e) => {
+                    if mode != OutputMode::Quiet {
+                        eprintln!(
+                            "Warning: Failed to read scan cache state: {}. Continuing without cache.",
+                            e
+                        );
+                    }
+                    cache_enabled = false;
+                    None
+                }
+            };
+
+            if cache_enabled {
+                use_incremental = previous_scan_id.is_some();
+                let scan_type = if use_incremental { "incremental" } else { "full" };
+                match cache.start_scan(scan_type, &categories) {
+                    Ok(id) => scan_id = Some(id),
+                    Err(e) => {
+                        if mode != OutputMode::Quiet {
+                            eprintln!(
+                                "Warning: Failed to start scan cache session: {}. Continuing without cache.",
+                                e
+                            );
+                        }
+                        use_incremental = false;
+                    }
+                }
+            }
+        }
     }
 
     // Create spinner for visual feedback (unless quiet mode)
@@ -364,6 +391,32 @@ pub fn scan_all(
     // for any paths that might have been missed (should be rare).
     // This can be removed entirely once we verify all scanners properly handle exclusions.
     filter_exclusions(&mut results, config);
+
+    // Finish scan session if cache is enabled (non-fatal if it fails)
+    if let Some(cache) = scan_cache.as_mut() {
+        if let Some(scan_id) = cache.current_scan_id() {
+            let mut stats = ScanStats::default();
+            stats.total_files = results.cache.items
+                + results.app_cache.items
+                + results.temp.items
+                + results.trash.items
+                + results.build.items
+                + results.downloads.items
+                + results.large.items
+                + results.old.items
+                + results.applications.items
+                + results.browser.items
+                + results.system.items
+                + results.empty.items
+                + results.duplicates.items
+                + results.windows_update.items
+                + results.event_logs.items;
+
+            let removed = cache.cleanup_stale(scan_id).unwrap_or(0);
+            stats.removed_files = removed;
+            let _ = cache.finish_scan(scan_id, stats);
+        }
+    }
 
     Ok(results)
 }
@@ -667,7 +720,7 @@ pub fn scan_all_with_progress(
                 + results.duplicates.items
                 + results.windows_update.items
                 + results.event_logs.items;
-            
+
             // Cleanup and finish are non-fatal - scan already completed
             let removed = cache.cleanup_stale(scan_id).unwrap_or(0);
             stats.removed_files = removed;

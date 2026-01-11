@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde_json;
 use std::collections::HashMap;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,19 +27,13 @@ impl ScanCache {
             .with_context(|| format!("Failed to create cache directory: {}", cache_dir.display()))?;
 
         let db_path = cache_dir.join("scan_cache.db");
-        
-        // Enable WAL mode for better concurrency and performance
-        let mut db = Connection::open(&db_path)
-            .with_context(|| format!("Failed to open database: {}", db_path.display()))?;
-        
-        // Enable WAL mode (Write-Ahead Logging) for better concurrency
-        // This allows multiple readers while one writer is active
-        db.pragma_update(None, "journal_mode", "WAL")
-            .with_context(|| "Failed to enable WAL mode")?;
-        
-        // Set busy timeout to handle concurrent access gracefully
-        db.busy_timeout(std::time::Duration::from_secs(30))
-            .with_context(|| "Failed to set busy timeout")?;
+
+        let db = match Self::open_connection(&db_path) {
+            Ok(db) => db,
+            Err(e) => {
+                return Self::recover_database(&db_path, e);
+            }
+        };
 
         let mut cache = Self {
             db,
@@ -47,31 +42,71 @@ impl ScanCache {
 
         // Initialize schema - if it fails due to corruption, try to recover
         if let Err(e) = cache.init_schema() {
-            // If schema init fails, try to backup and recreate
-            eprintln!("Warning: Failed to initialize cache schema: {}. Attempting recovery...", e);
-            
-            // Try to backup corrupted database
-            let backup_path = db_path.with_extension("db.backup");
-            let _ = std::fs::copy(&db_path, &backup_path);
-            
-            // Remove corrupted database and try again
-            let _ = std::fs::remove_file(&db_path);
-            
-            // Retry opening
-            let db = Connection::open(&db_path)
-                .with_context(|| format!("Failed to recreate database: {}", db_path.display()))?;
-            db.pragma_update(None, "journal_mode", "WAL")?;
-            db.busy_timeout(std::time::Duration::from_secs(30))?;
-            
-            let mut cache = Self {
-                db,
-                current_scan_id: None,
-            };
-            cache.init_schema()
-                .with_context(|| "Failed to initialize schema after recovery")?;
-            return Ok(cache);
+            eprintln!(
+                "Warning: Failed to initialize cache schema: {}. Attempting recovery...",
+                e
+            );
+            drop(cache);
+            return Self::recover_database(&db_path, e);
         }
-        
+
+        Ok(cache)
+    }
+
+    fn open_connection(db_path: &Path) -> Result<Connection> {
+        let db = Connection::open(db_path)
+            .with_context(|| format!("Failed to open database: {}", db_path.display()))?;
+
+        // Enable WAL mode (Write-Ahead Logging) for better concurrency
+        // This allows multiple readers while one writer is active
+        db.pragma_update(None, "journal_mode", "WAL")
+            .with_context(|| "Failed to enable WAL mode")?;
+
+        // Set busy timeout to handle concurrent access gracefully
+        db.busy_timeout(std::time::Duration::from_secs(30))
+            .with_context(|| "Failed to set busy timeout")?;
+
+        Ok(db)
+    }
+
+    fn recover_database(db_path: &Path, error: anyhow::Error) -> Result<Self> {
+        eprintln!(
+            "Warning: Scan cache is unavailable: {}. Attempting recovery...",
+            error
+        );
+
+        if db_path.exists() {
+            let backup_path = db_path.with_extension("db.backup");
+            if let Err(err) = std::fs::rename(db_path, &backup_path) {
+                eprintln!(
+                    "Warning: Failed to move corrupted cache database to {}: {}",
+                    backup_path.display(),
+                    err
+                );
+                if let Err(err) = std::fs::copy(db_path, &backup_path) {
+                    eprintln!(
+                        "Warning: Failed to backup corrupted cache database to {}: {}",
+                        backup_path.display(),
+                        err
+                    );
+                } else if let Err(err) = std::fs::remove_file(db_path) {
+                    eprintln!("Warning: Failed to remove corrupted cache database: {}", err);
+                }
+            }
+
+            let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+            let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+        }
+
+        let db = Self::open_connection(db_path)
+            .with_context(|| format!("Failed to recreate database: {}", db_path.display()))?;
+        let mut cache = Self {
+            db,
+            current_scan_id: None,
+        };
+        cache
+            .init_schema()
+            .with_context(|| "Failed to initialize schema after recovery")?;
         Ok(cache)
     }
 
@@ -190,7 +225,7 @@ impl ScanCache {
     pub fn check_file(&self, path: &Path) -> Result<FileStatus> {
         let path_str = normalize_path(path);
 
-        let result: Option<(u64, i64, i64)> = self.db.query_row(
+        let result: Option<(i64, i64, i64)> = self.db.query_row(
             "SELECT size, mtime_secs, mtime_nsecs FROM file_records WHERE path = ?1",
             [&path_str],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -203,13 +238,20 @@ impl ScanCache {
         // Get current file metadata
         let metadata = match std::fs::metadata(path) {
             Ok(m) => m,
-            Err(_) => return Ok(FileStatus::Deleted),
+            Err(err) => {
+                return if err.kind() == io::ErrorKind::NotFound {
+                    Ok(FileStatus::Deleted)
+                } else {
+                    Ok(FileStatus::Modified)
+                };
+            }
         };
 
-        let current_size = metadata.len();
-        let current_mtime = metadata
-            .modified()
-            .with_context(|| format!("Failed to get mtime: {}", path.display()))?;
+        let current_size = clamp_size_to_i64(metadata.len());
+        let current_mtime = match metadata.modified() {
+            Ok(mtime) => mtime,
+            Err(_) => return Ok(FileStatus::Modified),
+        };
 
         let (current_secs, current_nsecs) = system_time_to_secs_nsecs(current_mtime);
 
@@ -229,32 +271,40 @@ impl ScanCache {
             return Ok(result);
         }
 
+        let mut cached: HashMap<String, (i64, i64, i64)> = HashMap::new();
+        const SQLITE_MAX_VARS: usize = 900;
+
         // Get all cached records for these paths (normalize for consistent lookup)
-        let path_strs: Vec<String> = paths.iter().map(|p| normalize_path(p)).collect();
-        let placeholders = path_strs.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        for chunk in paths.chunks(SQLITE_MAX_VARS) {
+            let path_strs: Vec<String> = chunk.iter().map(|p| normalize_path(p)).collect();
+            let placeholders = path_strs.iter().map(|_| "?").collect::<Vec<_>>().join(",");
 
-        let mut stmt = self.db.prepare(&format!(
-            "SELECT path, size, mtime_secs, mtime_nsecs FROM file_records WHERE path IN ({})",
-            placeholders
-        ))?;
+            let mut stmt = self.db.prepare(&format!(
+                "SELECT path, size, mtime_secs, mtime_nsecs FROM file_records WHERE path IN ({})",
+                placeholders
+            ))?;
 
-        // Build params vector manually
-        let mut query_params: Vec<&dyn rusqlite::ToSql> = Vec::new();
-        for s in &path_strs {
-            query_params.push(s);
-        }
+            // Build params vector manually
+            let mut query_params: Vec<&dyn rusqlite::ToSql> = Vec::new();
+            for s in &path_strs {
+                query_params.push(s);
+            }
 
-        let cached: HashMap<String, (u64, i64, i64)> = stmt
-            .query_map(
+            let rows = stmt.query_map(
                 rusqlite::params_from_iter(query_params),
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        (row.get::<_, u64>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?),
+                        (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?),
                     ))
                 },
-            )?
-            .collect::<Result<HashMap<_, _>, _>>()?;
+            )?;
+
+            for row in rows {
+                let (path, values) = row?;
+                cached.insert(path, values);
+            }
+        }
 
         // Check each file
         for path in paths {
@@ -264,7 +314,7 @@ impl ScanCache {
                 // File is in cache, check if it changed
                 match std::fs::metadata(path) {
                     Ok(metadata) => {
-                        let current_size = metadata.len();
+                        let current_size = clamp_size_to_i64(metadata.len());
                         let current_mtime = metadata.modified().ok();
 
                         if let Some(mtime) = current_mtime {
@@ -282,16 +332,27 @@ impl ScanCache {
                             result.insert(path.clone(), FileStatus::Modified);
                         }
                     }
-                    Err(_) => {
-                        result.insert(path.clone(), FileStatus::Deleted);
+                    Err(err) => {
+                        if err.kind() == io::ErrorKind::NotFound {
+                            result.insert(path.clone(), FileStatus::Deleted);
+                        } else {
+                            result.insert(path.clone(), FileStatus::Modified);
+                        }
                     }
                 }
             } else {
                 // File not in cache
-                if path.exists() {
-                    result.insert(path.clone(), FileStatus::New);
-                } else {
-                    result.insert(path.clone(), FileStatus::Deleted);
+                match std::fs::metadata(path) {
+                    Ok(_) => {
+                        result.insert(path.clone(), FileStatus::New);
+                    }
+                    Err(err) => {
+                        if err.kind() == io::ErrorKind::NotFound {
+                            result.insert(path.clone(), FileStatus::Deleted);
+                        } else {
+                            result.insert(path.clone(), FileStatus::Modified);
+                        }
+                    }
                 }
             }
         }
@@ -307,11 +368,7 @@ impl ScanCache {
 
         // Handle potential integer overflow for very large files (>9PB)
         // SQLite INTEGER can store up to 8 bytes, so i64::MAX is safe
-        let size_i64 = if sig.size > i64::MAX as u64 {
-            i64::MAX // Cap at max value
-        } else {
-            sig.size as i64
-        };
+        let size_i64 = clamp_size_to_i64(sig.size);
 
         self.db.execute(
             "INSERT INTO file_records (path, size, mtime_secs, mtime_nsecs, content_hash, category, last_scan_id, created_at, updated_at)
@@ -359,11 +416,7 @@ impl ScanCache {
             let now = Utc::now().timestamp();
 
             // Handle potential integer overflow for very large files
-            let size_i64 = if sig.size > i64::MAX as u64 {
-                i64::MAX
-            } else {
-                sig.size as i64
-            };
+            let size_i64 = clamp_size_to_i64(sig.size);
 
             if let Err(e) = tx.execute(
                 "INSERT INTO file_records (path, size, mtime_secs, mtime_nsecs, content_hash, category, last_scan_id, created_at, updated_at)
@@ -405,8 +458,8 @@ impl ScanCache {
         )?;
         
         let mut paths = Vec::new();
-        let mut rows = stmt.query_map(params![category, previous_scan_id], |row| {
-            Ok(PathBuf::from(row.get::<_, String>(0)?))
+        let rows = stmt.query_map(params![category, previous_scan_id], |row| {
+            Ok(decode_path(&row.get::<_, String>(0)?))
         })?;
         
         for row in rows {
@@ -455,10 +508,15 @@ impl ScanCache {
         // Check which paths are deleted (outside transaction for efficiency)
         let mut deleted_paths = Vec::new();
         for path_str in paths {
-            let path = PathBuf::from(&path_str);
+            let path = decode_path(&path_str);
             // Use exists() check - if file doesn't exist, mark for deletion
-            if !path.exists() {
-                deleted_paths.push(path_str);
+            match std::fs::metadata(&path) {
+                Ok(_) => {}
+                Err(err) => {
+                    if err.kind() == io::ErrorKind::NotFound {
+                        deleted_paths.push(path_str);
+                    }
+                }
             }
         }
 
@@ -621,7 +679,56 @@ fn normalize_path(path: &Path) -> String {
     }
     #[cfg(not(windows))]
     {
-        path.to_string_lossy().replace('\\', "/")
+        use std::os::unix::ffi::OsStrExt;
+
+        let bytes = path.as_os_str().as_bytes();
+        match std::str::from_utf8(bytes) {
+            Ok(path_str) => path_str.to_string(),
+            Err(_) => {
+                let mut encoded = String::with_capacity(1 + bytes.len() * 2);
+                encoded.push('\0');
+                for byte in bytes {
+                    use std::fmt::Write;
+                    let _ = write!(&mut encoded, "{:02x}", byte);
+                }
+                encoded
+            }
+        }
+    }
+}
+
+fn decode_path(value: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        return PathBuf::from(value);
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::ffi::OsStringExt;
+
+        if !value.starts_with('\0') {
+            return PathBuf::from(value);
+        }
+
+        let hex = &value[1..];
+        if hex.len() % 2 != 0 {
+            return PathBuf::from(value);
+        }
+
+        let mut bytes = Vec::with_capacity(hex.len() / 2);
+        for pair in hex.as_bytes().chunks(2) {
+            let pair_str = match std::str::from_utf8(pair) {
+                Ok(s) => s,
+                Err(_) => return PathBuf::from(value),
+            };
+            let byte = match u8::from_str_radix(pair_str, 16) {
+                Ok(b) => b,
+                Err(_) => return PathBuf::from(value),
+            };
+            bytes.push(byte);
+        }
+
+        PathBuf::from(std::ffi::OsString::from_vec(bytes))
     }
 }
 
@@ -634,6 +741,14 @@ fn system_time_to_secs_nsecs(time: SystemTime) -> (i64, i64) {
             (secs, nsecs)
         }
         Err(_) => (0, 0), // Shouldn't happen for mtime, but handle gracefully
+    }
+}
+
+fn clamp_size_to_i64(size: u64) -> i64 {
+    if size > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        size as i64
     }
 }
 
