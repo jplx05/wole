@@ -95,6 +95,7 @@ fn batch_clean_category_internal(
         deleted_paths,
         skipped_paths,
         locked_paths,
+        permission_denied_paths,
     } = clean_paths_batch(paths, permanent);
 
     // Log successes and failures using pre-calculated sizes
@@ -114,10 +115,15 @@ fn batch_clean_category_internal(
                 "Path is locked by another process",
             );
         }
+        for path in &permission_denied_paths {
+            let size = path_sizes.get(path).copied().unwrap_or(0);
+            log.log_failure(path, size, category_name, permanent, "Permission denied");
+        }
         for path in paths {
             if deleted_paths.contains(path)
                 || skipped_paths.contains(path)
                 || locked_paths.contains(path)
+                || permission_denied_paths.contains(path)
             {
                 continue;
             }
@@ -459,6 +465,19 @@ pub fn clean_all(
                             );
                         }
                     }
+                    Ok(DeleteOutcome::SkippedPermission) => {
+                        errors += 1;
+                        if let Some(ref mut log) = history {
+                            log.log_failure(path, size, "browser", permanent, "Permission denied");
+                        }
+                        if mode != OutputMode::Quiet {
+                            eprintln!(
+                                "[WARNING] Failed to clean {}: {}",
+                                Theme::secondary(&path.display().to_string()),
+                                Theme::error("Permission denied")
+                            );
+                        }
+                    }
                     Err(e) => {
                         errors += 1;
                         if let Some(ref mut log) = history {
@@ -525,6 +544,19 @@ pub fn clean_all(
                             );
                         }
                     }
+                    Ok(DeleteOutcome::SkippedPermission) => {
+                        errors += 1;
+                        if let Some(ref mut log) = history {
+                            log.log_failure(path, size, "system", permanent, "Permission denied");
+                        }
+                        if mode != OutputMode::Quiet {
+                            eprintln!(
+                                "[WARNING] Failed to clean {}: {}",
+                                Theme::secondary(&path.display().to_string()),
+                                Theme::error("Permission denied")
+                            );
+                        }
+                    }
                     Err(e) => {
                         errors += 1;
                         if let Some(ref mut log) = history {
@@ -583,6 +615,19 @@ pub fn clean_all(
                                 "[WARNING] Failed to clean {}: {}",
                                 Theme::secondary(&path.display().to_string()),
                                 Theme::error("Path is locked by another process")
+                            );
+                        }
+                    }
+                    Ok(DeleteOutcome::SkippedPermission) => {
+                        errors += 1;
+                        if let Some(ref mut log) = history {
+                            log.log_failure(path, 0, "empty", permanent, "Permission denied");
+                        }
+                        if mode != OutputMode::Quiet {
+                            eprintln!(
+                                "[WARNING] Failed to clean {}: {}",
+                                Theme::secondary(&path.display().to_string()),
+                                Theme::error("Permission denied")
                             );
                         }
                     }
@@ -710,7 +755,9 @@ pub fn clean_all(
                     match delete_with_precheck(&artifact, permanent) {
                         Ok(DeleteOutcome::Deleted) => {}
                         Ok(DeleteOutcome::SkippedMissing | DeleteOutcome::SkippedSystem) => {}
-                        Ok(DeleteOutcome::SkippedLocked) => had_error = true,
+                        Ok(DeleteOutcome::SkippedLocked | DeleteOutcome::SkippedPermission) => {
+                            had_error = true;
+                        }
                         Err(_) => had_error = true,
                     }
                 }

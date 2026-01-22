@@ -1275,6 +1275,7 @@ fn perform_cleanup(
                             | cleaner::DeleteOutcome::SkippedSystem,
                         ) => {}
                         Ok(cleaner::DeleteOutcome::SkippedLocked) => had_error = true,
+                        Ok(cleaner::DeleteOutcome::SkippedPermission) => had_error = true,
                         Err(_) => had_error = true,
                     }
                 }
@@ -1354,6 +1355,17 @@ fn perform_cleanup(
                         "Path is locked by another process",
                     );
                 }
+                Ok(cleaner::DeleteOutcome::SkippedPermission) => {
+                    errors += 1;
+                    let category_lower = category.to_lowercase();
+                    history.log_failure(
+                        &path,
+                        size_bytes,
+                        &category_lower,
+                        permanent,
+                        "Permission denied",
+                    );
+                }
                 Err(e) => {
                     errors += 1;
                     // Log failure
@@ -1420,6 +1432,10 @@ fn perform_cleanup(
                         permanent,
                         "Path is locked by another process",
                     );
+                }
+                Ok(cleaner::DeleteOutcome::SkippedPermission) => {
+                    errors += 1;
+                    history.log_failure(&path, size_bytes, "cache", permanent, "Permission denied");
                 }
                 Err(e) => {
                     errors += 1;

@@ -3,7 +3,7 @@
 //! This module owns batch deletion operations and results.
 
 use super::path_precheck::{precheck_path, PrecheckOutcome};
-use super::single_deletion::{delete_with_precheck, DeleteOutcome};
+use super::single_deletion::{classify_anyhow_error, delete_with_precheck, DeleteOutcome};
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -13,6 +13,7 @@ pub struct BatchDeleteResult {
     pub deleted_paths: Vec<PathBuf>,
     pub skipped_paths: Vec<PathBuf>,
     pub locked_paths: Vec<PathBuf>,
+    pub permission_denied_paths: Vec<PathBuf>,
 }
 
 impl BatchDeleteResult {
@@ -23,6 +24,7 @@ impl BatchDeleteResult {
             deleted_paths: Vec::new(),
             skipped_paths: Vec::new(),
             locked_paths: Vec::new(),
+            permission_denied_paths: Vec::new(),
         }
     }
 }
@@ -60,6 +62,7 @@ pub fn clean_paths_batch(paths: &[PathBuf], permanent: bool) -> BatchDeleteResul
     let mut deleted_paths = Vec::with_capacity(paths.len());
     let mut skipped_paths: Vec<PathBuf> = Vec::new();
     let mut locked_paths: Vec<PathBuf> = Vec::new();
+    let mut permission_denied_paths: Vec<PathBuf> = Vec::new();
 
     if permanent {
         // Permanent deletes are already fast (direct filesystem ops)
@@ -76,6 +79,10 @@ pub fn clean_paths_batch(paths: &[PathBuf], permanent: bool) -> BatchDeleteResul
                 Ok(DeleteOutcome::SkippedLocked) => {
                     error_count += 1;
                     locked_paths.push(path.clone());
+                }
+                Ok(DeleteOutcome::SkippedPermission) => {
+                    error_count += 1;
+                    permission_denied_paths.push(path.clone());
                 }
                 Err(_) => error_count += 1,
             }
@@ -169,7 +176,19 @@ pub fn clean_paths_batch(paths: &[PathBuf], permanent: bool) -> BatchDeleteResul
                                         success_count += 1;
                                         deleted_paths.push(path.clone());
                                     } else {
-                                        error_count += 1;
+                                        match classify_anyhow_error(&path, &_err) {
+                                            Some(DeleteOutcome::SkippedLocked) => {
+                                                error_count += 1;
+                                                locked_paths.push(path.clone());
+                                            }
+                                            Some(DeleteOutcome::SkippedPermission) => {
+                                                error_count += 1;
+                                                permission_denied_paths.push(path.clone());
+                                            }
+                                            _ => {
+                                                error_count += 1;
+                                            }
+                                        }
                                     }
                                     #[cfg(debug_assertions)]
                                     eprintln!(
@@ -192,5 +211,6 @@ pub fn clean_paths_batch(paths: &[PathBuf], permanent: bool) -> BatchDeleteResul
         deleted_paths,
         skipped_paths,
         locked_paths,
+        permission_denied_paths,
     }
 }

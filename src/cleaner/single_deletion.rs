@@ -12,7 +12,56 @@ pub enum DeleteOutcome {
     Deleted,
     SkippedMissing,
     SkippedLocked,
+    SkippedPermission,
     SkippedSystem,
+}
+
+fn locked_error_codes() -> &'static [i32] {
+    &[32, 33]
+}
+
+fn classify_permission_denied(path: &Path) -> DeleteOutcome {
+    if is_path_locked(path) {
+        DeleteOutcome::SkippedLocked
+    } else {
+        DeleteOutcome::SkippedPermission
+    }
+}
+
+fn classify_io_error(path: &Path, err: &std::io::Error) -> Option<DeleteOutcome> {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        return Some(DeleteOutcome::SkippedMissing);
+    }
+
+    if let Some(code) = err.raw_os_error() {
+        if locked_error_codes().contains(&code) {
+            return Some(DeleteOutcome::SkippedLocked);
+        }
+
+        if code == 5 {
+            return Some(classify_permission_denied(path));
+        }
+    }
+
+    if err.kind() == std::io::ErrorKind::PermissionDenied {
+        return Some(classify_permission_denied(path));
+    }
+
+    None
+}
+
+pub(crate) fn classify_anyhow_error(path: &Path, err: &anyhow::Error) -> Option<DeleteOutcome> {
+    if let Some(io_err) = err.downcast_ref::<std::io::Error>() {
+        return classify_io_error(path, io_err);
+    }
+
+    for cause in err.chain() {
+        if let Some(io_err) = cause.downcast_ref::<std::io::Error>() {
+            return classify_io_error(path, io_err);
+        }
+    }
+
+    None
 }
 
 pub fn delete_with_precheck(path: &Path, permanent: bool) -> Result<DeleteOutcome> {
@@ -32,26 +81,32 @@ pub fn delete_with_precheck(path: &Path, permanent: bool) -> Result<DeleteOutcom
 
         match result {
             Ok(()) => Ok(DeleteOutcome::Deleted),
-            Err(err) => {
-                if !path.exists() {
-                    Ok(DeleteOutcome::SkippedMissing)
-                } else {
-                    Err(err).with_context(|| {
-                        format!("Failed to permanently delete: {}", path.display())
-                    })
+            Err(err) => match classify_io_error(path, &err) {
+                Some(outcome) => Ok(outcome),
+                None => {
+                    if !path.exists() {
+                        Ok(DeleteOutcome::SkippedMissing)
+                    } else {
+                        Err(err).with_context(|| {
+                            format!("Failed to permanently delete: {}", path.display())
+                        })
+                    }
                 }
-            }
+            },
         }
     } else {
         match crate::trash_ops::delete(path) {
             Ok(()) => Ok(DeleteOutcome::Deleted),
-            Err(err) => {
-                if !path.exists() {
-                    Ok(DeleteOutcome::SkippedMissing)
-                } else {
-                    Err(err).with_context(|| format!("Failed to delete: {}", path.display()))
+            Err(err) => match classify_anyhow_error(path, &err) {
+                Some(outcome) => Ok(outcome),
+                None => {
+                    if !path.exists() {
+                        Ok(DeleteOutcome::SkippedMissing)
+                    } else {
+                        Err(err).with_context(|| format!("Failed to delete: {}", path.display()))
+                    }
                 }
-            }
+            },
         }
     }
 }
