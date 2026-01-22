@@ -1448,13 +1448,7 @@ fn perform_cleanup(
                 }
                 Ok(cleaner::DeleteOutcome::SkippedPermission) => {
                     errors += 1;
-                    history.log_failure(
-                        &path,
-                        size_bytes,
-                        "cache",
-                        permanent,
-                        "Permission denied",
-                    );
+                    history.log_failure(&path, size_bytes, "cache", permanent, "Permission denied");
                 }
                 Err(e) => {
                     errors += 1;
