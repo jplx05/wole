@@ -176,63 +176,6 @@ fn defer_finish_scan(scan_session_id: i64, stats: ScanStats) {
     });
 }
 
-/// Check if a file path is in the recycle bin
-/// Returns true if the file exists in the recycle bin, false otherwise
-fn is_in_recycle_bin(path: &Path) -> bool {
-    // Only check recycle bin on Windows (where trash_ops::list works)
-    #[cfg(windows)]
-    {
-        use crate::restore::normalize_path_for_comparison;
-
-        // Try to get recycle bin contents (non-fatal if it fails)
-        if let Ok(recycle_bin_items) = crate::trash_ops::list() {
-            let path_str = path.display().to_string();
-            let normalized_path = normalize_path_for_comparison(&path_str);
-
-            // Check if any recycle bin item matches this path
-            for item in recycle_bin_items {
-                let original_path = item.original_parent.join(&item.name);
-                let normalized_original =
-                    normalize_path_for_comparison(&original_path.display().to_string());
-
-                // Exact match
-                if normalized_original == normalized_path {
-                    return true;
-                }
-
-                // Check if path is inside a deleted directory
-                // Windows Recycle Bin stores individual files when directories are deleted
-                let normalized_original_with_sep = if normalized_original.ends_with('/') {
-                    normalized_original.clone()
-                } else {
-                    format!("{}/", normalized_original)
-                };
-
-                if normalized_path.starts_with(&normalized_original_with_sep) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        // On non-Windows, check using trash crate if available
-        if let Ok(recycle_bin_items) = crate::trash_ops::list() {
-            let path_str = path.display().to_string();
-
-            for item in recycle_bin_items {
-                let original_path = item.original_parent.join(&item.name);
-                if original_path == path {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
-}
-
 /// Try incremental scan for a category
 /// Returns Ok(Some(result)) if cache was used, Ok(None) if full scan needed, Err on error
 fn try_incremental_scan(
