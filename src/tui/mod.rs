@@ -1179,10 +1179,7 @@ fn run_delete_with_ui(
         }
 
         if !warned && last_tick_update.elapsed().as_secs() >= 5 {
-            debug_log::cleaning_log(&format!(
-                "delete still running after 5s: {}",
-                display_path
-            ));
+            debug_log::cleaning_log(&format!("delete still running after 5s: {}", display_path));
             warned = true;
         }
 
@@ -1478,10 +1475,7 @@ fn perform_cleanup(
                 ) => {}
                 Ok(cleaner::DeleteOutcome::SkippedLocked) => {
                     errors += 1;
-                    debug_log::cleaning_log(&format!(
-                        "special item locked: {}",
-                        path.display()
-                    ));
+                    debug_log::cleaning_log(&format!("special item locked: {}", path.display()));
                     let category_lower = category.to_lowercase();
                     history.log_failure(
                         &path,
@@ -1574,10 +1568,7 @@ fn perform_cleanup(
                 ) => {}
                 Ok(cleaner::DeleteOutcome::SkippedLocked) => {
                     errors += 1;
-                    debug_log::cleaning_log(&format!(
-                        "cache item locked: {}",
-                        path.display()
-                    ));
+                    debug_log::cleaning_log(&format!("cache item locked: {}", path.display()));
                     history.log_failure(
                         &path,
                         size_bytes,
@@ -1671,16 +1662,9 @@ fn perform_cleanup(
             }
 
             // Delete this batch
-            debug_log::cleaning_log(&format!(
-                "temp batch delete: count={}",
-                batch_chunk.len()
-            ));
-            let batch_result = run_batch_delete_with_ui(
-                app_state,
-                terminal,
-                batch_chunk.to_vec(),
-                permanent,
-            );
+            debug_log::cleaning_log(&format!("temp batch delete: count={}", batch_chunk.len()));
+            let batch_result =
+                run_batch_delete_with_ui(app_state, terminal, batch_chunk.to_vec(), permanent);
             temp_success += batch_result.success_count;
             temp_errors += batch_result.error_count;
             deleted_paths.extend(batch_result.deleted_paths);
@@ -1808,16 +1792,9 @@ fn perform_cleanup(
             }
 
             // Delete this batch
-            debug_log::cleaning_log(&format!(
-                "batch delete chunk: count={}",
-                batch_chunk.len()
-            ));
-            let batch_result = run_batch_delete_with_ui(
-                app_state,
-                terminal,
-                batch_chunk.to_vec(),
-                permanent,
-            );
+            debug_log::cleaning_log(&format!("batch delete chunk: count={}", batch_chunk.len()));
+            let batch_result =
+                run_batch_delete_with_ui(app_state, terminal, batch_chunk.to_vec(), permanent);
             batch_success += batch_result.success_count;
             batch_errors += batch_result.error_count;
             deleted_paths.extend(batch_result.deleted_paths);

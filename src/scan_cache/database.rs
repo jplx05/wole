@@ -813,7 +813,9 @@ impl ScanCache {
         // Avoid blocking on database locks at the tail end of a scan.
         let _ = self.db.busy_timeout(Duration::from_millis(0));
         let result = self.finish_scan(scan_id, stats);
-        let _ = self.db.busy_timeout(Duration::from_secs(DB_BUSY_TIMEOUT_SECS));
+        let _ = self
+            .db
+            .busy_timeout(Duration::from_secs(DB_BUSY_TIMEOUT_SECS));
 
         match result {
             Ok(()) => Ok(true),
@@ -995,7 +997,10 @@ impl ScanCache {
 fn is_busy_error(err: &anyhow::Error) -> bool {
     match err.downcast_ref::<rusqlite::Error>() {
         Some(rusqlite::Error::SqliteFailure(code, _))
-            if matches!(code.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) =>
+            if matches!(
+                code.code,
+                ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked
+            ) =>
         {
             true
         }

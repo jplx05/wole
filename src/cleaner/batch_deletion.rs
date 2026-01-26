@@ -58,8 +58,14 @@ pub fn clean_paths_batch(paths: &[PathBuf], permanent: bool) -> BatchDeleteResul
         return BatchDeleteResult::empty();
     }
 
-    let first_path = paths.first().map(|p| p.display().to_string()).unwrap_or_default();
-    let last_path = paths.last().map(|p| p.display().to_string()).unwrap_or_default();
+    let first_path = paths
+        .first()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let last_path = paths
+        .last()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     debug_log::cleaning_log(&format!(
         "batch delete start: permanent={} count={} first={} last={}",
         permanent,

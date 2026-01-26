@@ -33,7 +33,8 @@ impl RecycleBinIndex {
 
             for item in items {
                 let original_path = item.original_parent.join(&item.name);
-                let normalized = normalize_path_for_comparison(&original_path.display().to_string());
+                let normalized =
+                    normalize_path_for_comparison(&original_path.display().to_string());
                 exact.insert(normalized.clone());
                 if normalized.ends_with('/') {
                     prefixes.push(normalized);
@@ -167,7 +168,10 @@ fn defer_finish_scan(scan_session_id: i64, stats: ScanStats) {
             }
         };
         if let Err(e) = cache.finish_scan(scan_session_id, stats) {
-            eprintln!("Warning: Failed to finish scan session in background: {}", e);
+            eprintln!(
+                "Warning: Failed to finish scan session in background: {}",
+                e
+            );
         }
     });
 }
